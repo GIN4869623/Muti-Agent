@@ -18,23 +18,9 @@ const getBackendBaseUrl = (): string | null => {
   return process.env.AGENT_SDR_BASE_URL?.trim() ?? null;
 };
 
-/** Map Agent_SDR tool names → frontend agentId for correct UI routing. */
-const toolNameToAgentId = (name: string): AgentSdrId => {
-  if (name === "search_sdr_knowledge") return "rag";
-  if (
-    [
-      "perform_physical_scan",
-      "tone_loopback_visualize",
-      "stop_hardware_task",
-      "text_fsk_send_and_receive",
-      "adaptive_modulation_transmit",
-      "auto_optimal_transmit",
-      "start_video_stream",
-      "stop_video_stream",
-      "video_stream_status",
-    ].includes(name)
-  )
-    return "usrp";
+/** 所有工具调用统一由协同编排智能体(supervisor)编排。
+  网络监管智能体(usrp)和知识智能体(rag)是待接入的外部智能体。 */
+const toolNameToAgentId = (_name: string): AgentSdrId => {
   return "supervisor";
 };
 

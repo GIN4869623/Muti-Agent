@@ -280,7 +280,7 @@ const serviceCatalog: ServiceDefinition[] = [
   {
     id: "diagnosis-workflow",
     name: "扫频诊断协同流程",
-    agentId: "rag",
+    agentId: "usrp",
     agentName: "协同编排智能体",
     trigger: "Skill",
     toolName: "sdr_scan_diagnosis",

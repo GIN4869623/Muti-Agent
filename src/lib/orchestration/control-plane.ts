@@ -184,8 +184,8 @@ export const registerSkill = async (payload: unknown): Promise<RegisteredSkill> 
 };
 
 export const inferAgentTarget = (message: string): AgentSdrId => {
-  if (/知识|检索|rag|解释|依据/i.test(message)) return "rag";
-  if (/扫频|频谱|usrp|sdr|tone|发射|调制|频点|物理层/i.test(message)) return "usrp";
+  // 网络监管智能体(usrp)和知识智能体(rag)是待接入的外部智能体，
+  // 当前所有内部业务路由统一经过协同编排智能体(supervisor)。
   return "supervisor";
 };
 

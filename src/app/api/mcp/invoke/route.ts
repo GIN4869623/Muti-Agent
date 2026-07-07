@@ -118,7 +118,7 @@ ${JSON.stringify(toolArgs, null, 2)}
 
         publishAgentActivity({
           type: "agent.activity",
-          agentId: toolName === "search_sdr_knowledge" ? "rag" : "usrp",
+          agentId: "supervisor",
           sourceAgentId: "supervisor",
           phase: "tool_completed",
           runId,
