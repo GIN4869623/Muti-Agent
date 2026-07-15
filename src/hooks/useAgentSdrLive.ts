@@ -48,7 +48,7 @@ const mergeActivity = (
   if (!activity) return snapshot;
   return {
     ...snapshot,
-    connected: true,
+    // connected 只由状态轮询决定，activity 事件只更新 working/status/task
     working: activity.working,
     status: activity.status,
     task: activity.task,
@@ -63,6 +63,7 @@ export function useAgentSdrLive() {
   >({});
   const [eventStreamConnected, setEventStreamConnected] = useState(false);
   const [eventReceiverConnected, setEventReceiverConnected] = useState(false);
+  const [backendConnected, setBackendConnected] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -93,16 +94,37 @@ export function useAgentSdrLive() {
     source.onopen = () => setEventReceiverConnected(true);
     source.onmessage = (message) => {
       try {
-        const event = JSON.parse(message.data) as unknown;
-        if (!isAgentSdrActivityEvent(event)) return;
+        const parsed = JSON.parse(message.data) as unknown;
+        if (!parsed || typeof parsed !== "object") return;
+
+        const record = parsed as Record<string, unknown>;
+
+        // 心跳
+        if (record.type === "heartbeat") {
+          setEventStreamConnected(true);
+          return;
+        }
+
+        // MCP 客户端连通性事件（agent-events/route.ts 直推）
+        if (record.type === "backend-connected") {
+          setBackendConnected(true);
+          return;
+        }
+        if (record.type === "backend-disconnected") {
+          setBackendConnected(false);
+          return;
+        }
+
+        // 业务事件
+        if (!isAgentSdrActivityEvent(parsed)) return;
         setEventStreamConnected(true);
-        setEvents((current) => [event, ...current].slice(0, 30));
+        setEvents((current) => [parsed, ...current].slice(0, 30));
         setActivityByAgent((current) => ({
           ...current,
-          [event.agentId]: {
-            working: ACTIVE_PHASES.has(event.phase),
-            status: resolveEventStatus(event),
-            task: resolveEventTask(event),
+          [parsed.agentId]: {
+            working: ACTIVE_PHASES.has(parsed.phase),
+            status: resolveEventStatus(parsed),
+            task: resolveEventTask(parsed),
           },
         }));
       } catch {
@@ -119,11 +141,12 @@ export function useAgentSdrLive() {
 
   const agents = useMemo(() => {
     if (!snapshot) return null;
-    return {
-      usrp: mergeActivity(snapshot.agents.usrp, activityByAgent.usrp),
-      rag: mergeActivity(snapshot.agents.rag, activityByAgent.rag),
-    };
-  }, [activityByAgent.rag, activityByAgent.usrp, snapshot]);
+    const result: Record<string, AgentSdrAgentSnapshot> = {};
+    for (const [id, agent] of Object.entries(snapshot.agents)) {
+      result[id] = mergeActivity(agent, activityByAgent[id]);
+    }
+    return result;
+  }, [activityByAgent, snapshot]);
 
   return {
     snapshot,
@@ -131,5 +154,6 @@ export function useAgentSdrLive() {
     events,
     eventStreamConnected,
     eventReceiverConnected,
+    backendConnected,
   };
 }

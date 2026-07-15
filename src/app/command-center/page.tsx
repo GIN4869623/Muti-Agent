@@ -39,7 +39,7 @@ import { useAgentSdrLive } from "@/hooks/useAgentSdrLive";
 
 import styles from "./command-center.module.css";
 
-type AgentId = "usrp" | "rag";
+type AgentId = string;
 type ServiceStatus = "running" | "completed" | "pending";
 
 type AgentRecord = {
@@ -112,6 +112,13 @@ type RegisteredSkillView = {
 };
 
 type RegistryDialog = "mcp" | "skill" | null;
+
+/** agentId → 中文名称映射，新接入的智能体在这里加一行即可。 */
+const agentNameRegistry: Record<string, string> = {
+  usrp: "网络监管智能体",
+  rag: "知识智能体",
+  supervisor: "协同编排智能体",
+};
 
 const baseAgents: AgentRecord[] = [
   {
@@ -351,6 +358,7 @@ export default function CommandCenterPage() {
     events: liveActivityEvents,
     eventStreamConnected,
     eventReceiverConnected,
+    backendConnected,
   } = useAgentSdrLive();
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId>("usrp");
   const [chatMessage, setChatMessage] = useState("帮我扫频并判断当前最适合通信的频点");
@@ -394,7 +402,8 @@ export default function CommandCenterPage() {
     "等待远端智能体上报业务请求";
 
   const hasStatusConnection = agentSdrSnapshot?.connected === true;
-  const hasAnyLiveConnection = hasStatusConnection || eventStreamConnected;
+  // 指示灯 = 状态轮询（可靠，≤3s 延迟）或 收到业务事件（秒级响应）
+  const hasAnyLiveConnection = hasStatusConnection || backendConnected;
 
   const activeServices = useMemo(
     () => {
@@ -432,8 +441,8 @@ export default function CommandCenterPage() {
             ...matched,
             id: `${matched.id}-${eventKey}`,
             name: event.task?.trim() || event.toolName?.trim() || matched.name,
-            agentId: event.agentId === "rag" ? "rag" : "usrp",
-            agentName: event.agentId === "rag" ? "知识智能体" : "网络监管智能体",
+            agentId: event.agentId,
+            agentName: agentNameRegistry[event.agentId] ?? event.agentId,
             status: "running",
             toolName: event.toolName?.trim() || matched.toolName,
             description: event.detail?.trim() || matched.description,

@@ -7,6 +7,8 @@ import {
   publishAgentActivity,
   subscribeToAgentActivity,
 } from "@/lib/integrations/agent-event-hub";
+import { loadAgentSdrConfig } from "@/lib/integrations/agent-sdr-config";
+import { startAgentSdrMcpClient } from "@/lib/integrations/agent-sdr-mcp-client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,63 +26,97 @@ const isAuthorized = (request: Request): boolean => {
   return request.headers.get("authorization") === `Bearer ${configuredToken}`;
 };
 
-const getBackendBaseUrl = (): string | null =>
-  process.env.AGENT_SDR_BASE_URL?.trim() ?? null;
-
 export async function GET(request: Request) {
   let unsubscribe = () => {};
   let heartbeat: ReturnType<typeof setInterval> | null = null;
+  const disposers: Array<() => void> = [];
+  let closed = false;
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    unsubscribe();
+    if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+    for (const d of disposers) d();
+  };
+
+  const safeEnqueue = (controller: ReadableStreamDefaultController<Uint8Array>, chunk: Uint8Array) => {
+    if (closed) return;
+    try { controller.enqueue(chunk); } catch { /* controller already closed */ }
+  };
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      // ── Inject backend connectivity status event at stream open ──
-      const backendUrl = getBackendBaseUrl();
-      if (backendUrl) {
+      // ── 每后端 health check + 启动 MCP SSE 客户端 ──
+      const config = loadAgentSdrConfig();
+      for (const baseUrl of config.baseUrls) {
+        // Health check — 只要能连通就通知前端
+        let backendReachable = false;
         try {
-          const healthResp = await fetch(`${backendUrl}/api/health`, {
+          const healthResp = await fetch(`${baseUrl}/api/health`, {
             signal: AbortSignal.timeout(2_000),
           });
           if (healthResp.ok) {
+            backendReachable = true;
+            safeEnqueue(
+              controller,
+              encoder.encode('data: {"type":"backend-connected","url":"' + baseUrl + '"}\n\n'),
+            );
             const health = (await healthResp.json()) as Record<string, unknown>;
             publishAgentActivity({
               type: "agent.activity",
               agentId: "supervisor",
               phase: "completed",
-              task: `Agent_SDR 后端已连接 · ${backendUrl}`,
+              task: `Agent_SDR 后端已连接 · ${baseUrl}`,
               detail: `模型: ${String(health.models ?? "---")}, 文档: ${health.knowledge_documents ?? "---"}`,
             });
           }
         } catch {
           // Backend unreachable — frontend will show offline state via status polling
         }
+
+        // MCP SSE 客户端（如果 /mcp/sse 可用，连通性事件由回调推送）
+        disposers.push(
+          startAgentSdrMcpClient(baseUrl, {
+            onConnect: () => {
+              if (!backendReachable) {
+                safeEnqueue(
+                  controller,
+                  encoder.encode('data: {"type":"backend-connected","url":"' + baseUrl + '"}\n\n'),
+                );
+              }
+            },
+            onDisconnect: () =>
+              safeEnqueue(
+                controller,
+                encoder.encode('data: {"type":"backend-disconnected","url":"' + baseUrl + '"}\n\n'),
+              ),
+          }),
+        );
       }
 
+      // ── Replay + subscribe ──
       for (const event of listRecentAgentActivity().slice().reverse()) {
-        controller.enqueue(encodeEvent(event));
+        safeEnqueue(controller, encodeEvent(event));
       }
       unsubscribe = subscribeToAgentActivity((event) => {
-        controller.enqueue(encodeEvent(event));
+        safeEnqueue(controller, encodeEvent(event));
       });
       heartbeat = setInterval(() => {
-        controller.enqueue(encoder.encode(": heartbeat\n\n"));
+        safeEnqueue(controller, encoder.encode('data: {"type":"heartbeat"}\n\n'));
       }, 15_000);
+
       request.signal.addEventListener(
         "abort",
         () => {
-          unsubscribe();
-          if (heartbeat) clearInterval(heartbeat);
-          try {
-            controller.close();
-          } catch {
-            // The client may already have closed the stream.
-          }
+          cleanup();
+          try { controller.close(); } catch { /* already closed */ }
         },
         { once: true },
       );
     },
     cancel() {
-      unsubscribe();
-      if (heartbeat) clearInterval(heartbeat);
+      cleanup();
     },
   });
 

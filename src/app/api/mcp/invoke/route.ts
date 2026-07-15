@@ -7,14 +7,16 @@ import {
   registerMcpServer,
 } from "@/lib/orchestration/control-plane";
 import { publishAgentActivity } from "@/lib/integrations/agent-event-hub";
+import { loadAgentSdrConfig } from "@/lib/integrations/agent-sdr-config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // ── Agent_SDR backend integration ──────────────────────────────────────────
 
-const getBackendBaseUrl = (): string | null => {
-  return process.env.AGENT_SDR_BASE_URL?.trim() ?? null;
+const getPrimaryBackendUrl = (): string | null => {
+  const config = loadAgentSdrConfig();
+  return config.baseUrls[0] ?? null;
 };
 
 /** Available MCP tools on the Agent_SDR backend. */
@@ -82,7 +84,7 @@ export async function POST(request: Request) {
   const toolName = typeof record.toolName === "string" ? record.toolName : "mcp_tool";
   const toolArgs =
     record.args && typeof record.args === "object" ? (record.args as Record<string, unknown>) : {};
-  const backendUrl = getBackendBaseUrl();
+  const backendUrl = getPrimaryBackendUrl();
 
   // ── Path A: Real Agent_SDR backend available ─────────────────────────
   if (backendUrl && AGENT_SDR_TOOLS.has(toolName)) {

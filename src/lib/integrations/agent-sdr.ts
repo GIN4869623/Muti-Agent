@@ -1,4 +1,4 @@
-export type AgentSdrId = "usrp" | "rag" | "supervisor";
+export type AgentSdrId = string;
 
 export type AgentSdrPhase =
   | "idle"
@@ -24,13 +24,10 @@ export type AgentSdrAgentSnapshot = {
 export type AgentSdrStatusSnapshot = {
   connected: boolean;
   checkedAt: string;
-  baseUrl: string;
+  baseUrls: string[];
   eventStreamAvailable: boolean | null;
   error: string | null;
-  agents: {
-    usrp: AgentSdrAgentSnapshot;
-    rag: AgentSdrAgentSnapshot;
-  };
+  agents: Record<string, AgentSdrAgentSnapshot>;
 };
 
 export type AgentSdrActivityEvent = {
@@ -59,9 +56,7 @@ export const isAgentSdrActivityEvent = (value: unknown): value is AgentSdrActivi
   const record = value as Record<string, unknown>;
   return (
     record.type === "agent.activity" &&
-    (record.agentId === "usrp" ||
-      record.agentId === "rag" ||
-      record.agentId === "supervisor") &&
+    typeof record.agentId === "string" &&
     typeof record.phase === "string"
   );
 };

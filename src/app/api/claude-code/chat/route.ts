@@ -8,14 +8,16 @@ import {
 } from "@/lib/orchestration/control-plane";
 import type { AgentSdrId } from "@/lib/integrations/agent-sdr";
 import { publishAgentActivity } from "@/lib/integrations/agent-event-hub";
+import { loadAgentSdrConfig } from "@/lib/integrations/agent-sdr-config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // ── Agent_SDR backend integration ──────────────────────────────────────────
 
-const getBackendBaseUrl = (): string | null => {
-  return process.env.AGENT_SDR_BASE_URL?.trim() ?? null;
+const getPrimaryBackendUrl = (): string | null => {
+  const config = loadAgentSdrConfig();
+  return config.baseUrls[0] ?? null;
 };
 
 /** 所有工具调用统一由协同编排智能体(supervisor)编排。
@@ -49,7 +51,7 @@ export async function POST(request: Request) {
       ? record.sessionId.trim()
       : "local-session";
   const runId = createRunId();
-  const backendUrl = getBackendBaseUrl();
+  const backendUrl = getPrimaryBackendUrl();
 
   // ── Path A: Real Agent_SDR backend available ─────────────────────────
   if (backendUrl) {
@@ -378,7 +380,7 @@ export async function POST(request: Request) {
       toolName,
       detail: backendUrl
         ? `Agent_SDR 后端 ${backendUrl} 不可达，执行 dry-run 回退。`
-        : "当前为 dry-run 编排事件；未配置 AGENT_SDR_BASE_URL。",
+        : "当前为 dry-run 编排事件；未配置 AGENT_SDR_BASE_URLS。",
     });
   }
 
@@ -394,7 +396,7 @@ export async function POST(request: Request) {
         expectedEndpoint: "POST /api/claude-code/chat",
         nextStep: backendUrl
           ? `Agent_SDR backend ${backendUrl} returned an error — check if the service is running.`
-          : "Set AGENT_SDR_BASE_URL to connect a real Agent_SDR backend.",
+          : "Set AGENT_SDR_BASE_URLS to connect a real Agent_SDR backend.",
       },
       message: backendUrl
         ? `Agent_SDR 后端 ${backendUrl} 不可达，已执行 dry-run 回退。`

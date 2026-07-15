@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server";
 
-import {
-  loadAgentSdrConfig,
-  type AgentSdrIntegrationConfig,
-} from "@/lib/integrations/agent-sdr-config";
+import { loadAgentSdrConfig } from "@/lib/integrations/agent-sdr-config";
 import type {
   AgentSdrAgentSnapshot,
   AgentSdrId,
@@ -45,12 +42,12 @@ const fallbackAgents: Record<"usrp" | "rag", AgentSdrAgentSnapshot> = {
 };
 
 const buildOfflineSnapshot = (
-  config: AgentSdrIntegrationConfig,
+  baseUrl: string,
   error: string,
 ): AgentSdrStatusSnapshot => ({
   connected: false,
   checkedAt: new Date().toISOString(),
-  baseUrl: config.baseUrl,
+  baseUrls: [baseUrl],
   eventStreamAvailable: false,
   error,
   agents: fallbackAgents,
@@ -88,7 +85,7 @@ const normalizeAgentSnapshot = (
 
 const normalizeStatusSnapshot = (
   value: unknown,
-  config: AgentSdrIntegrationConfig,
+  baseUrl: string,
 ): AgentSdrStatusSnapshot | null => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const snapshot = value as Record<string, unknown>;
@@ -102,8 +99,7 @@ const normalizeStatusSnapshot = (
       typeof snapshot.checkedAt === "string"
         ? snapshot.checkedAt
         : new Date().toISOString(),
-    baseUrl:
-      typeof snapshot.baseUrl === "string" ? snapshot.baseUrl : config.baseUrl,
+    baseUrls: [baseUrl],
     eventStreamAvailable:
       typeof snapshot.eventStreamAvailable === "boolean"
         ? snapshot.eventStreamAvailable
@@ -118,20 +114,15 @@ const normalizeStatusSnapshot = (
 
 // ── Agent_SDR hardware_status adapter ──────────────────────────────────────
 
-/**
- * Convert Agent_SDR /api/hardware_status response into the frontend's
- * AgentSdrStatusSnapshot format so the control console can display real
- * USRP state, knowledge-base stats, and health diagnostics.
- */
 const normalizeHardwareStatusToSnapshot = (
   hwStatus: Record<string, unknown>,
-  config: AgentSdrIntegrationConfig,
+  baseUrl: string,
   healthInfo: Record<string, unknown> | null,
 ): AgentSdrStatusSnapshot => {
   const serverIp = typeof hwStatus.server_ip === "string" ? hwStatus.server_ip : "---";
   const usrpIp = typeof hwStatus.usrp_01_ip === "string"
     ? hwStatus.usrp_01_ip
-    : config.baseUrl;
+    : baseUrl;
   const knowledgeDocuments =
     typeof hwStatus.knowledge_documents === "number"
       ? hwStatus.knowledge_documents
@@ -160,7 +151,6 @@ const normalizeHardwareStatusToSnapshot = (
       : "空闲待命";
   const usrpStatus = uhdAvailable ? "就绪" : "离线";
 
-  // Extract USRP metrics from diagnostics
   const centerFreq =
     typeof diagnostics.center_freq === "number"
       ? `${(diagnostics.center_freq as number) / 1e6} MHz`
@@ -184,9 +174,6 @@ const normalizeHardwareStatusToSnapshot = (
   const models = healthInfo?.models as Record<string, string> | undefined;
   const activeModel = models?.think ?? models?.fast ?? "--";
 
-  // ── Check event stream availability ──
-  // We consider it available if the backend returned a valid hardware_status,
-  // which implies the server is running (SSE chat endpoint should be available).
   const eventStreamAvailable = true;
 
   const usrpAgent: AgentSdrAgentSnapshot = {
@@ -220,20 +207,20 @@ const normalizeHardwareStatusToSnapshot = (
   return {
     connected: true,
     checkedAt: new Date().toISOString(),
-    baseUrl: config.baseUrl,
+    baseUrls: [baseUrl],
     eventStreamAvailable,
     error: null,
     agents: { usrp: usrpAgent, rag: ragAgent },
   };
 };
 
-// ── Fetch helpers ──────────────────────────────────────────────────────────
+// ── Fetch helpers (per-backend) ────────────────────────────────────────────
 
 const fetchHealthInfo = async (
-  config: AgentSdrIntegrationConfig,
+  baseUrl: string,
 ): Promise<Record<string, unknown> | null> => {
   try {
-    const response = await fetch(`${config.baseUrl}/api/health`, {
+    const response = await fetch(`${baseUrl}/api/health`, {
       cache: "no-store",
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(1_200),
@@ -246,67 +233,138 @@ const fetchHealthInfo = async (
 };
 
 const fetchHardwareStatus = async (
-  config: AgentSdrIntegrationConfig,
+  baseUrl: string,
 ): Promise<AgentSdrStatusSnapshot | null> => {
   try {
-    const response = await fetch(`${config.baseUrl}/api/hardware_status`, {
+    const response = await fetch(`${baseUrl}/api/hardware_status`, {
       cache: "no-store",
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(1_500),
     });
     if (!response.ok) return null;
     const hwStatus = (await response.json()) as Record<string, unknown>;
-    const healthInfo = await fetchHealthInfo(config);
-    return normalizeHardwareStatusToSnapshot(hwStatus, config, healthInfo);
+    const healthInfo = await fetchHealthInfo(baseUrl);
+    return normalizeHardwareStatusToSnapshot(hwStatus, baseUrl, healthInfo);
   } catch {
     return null;
   }
 };
 
 const fetchGenericStatus = async (
-  config: AgentSdrIntegrationConfig,
+  baseUrl: string,
   path: string,
 ): Promise<AgentSdrStatusSnapshot | null> => {
   try {
-    const response = await fetch(`${config.baseUrl}${path}`, {
+    const response = await fetch(`${baseUrl}${path}`, {
       cache: "no-store",
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(1_200),
     });
     if (!response.ok) return null;
-    return normalizeStatusSnapshot(await response.json(), config);
+    return normalizeStatusSnapshot(await response.json(), baseUrl);
   } catch {
     return null;
   }
 };
 
 const fetchStatusSnapshot = async (
-  config: AgentSdrIntegrationConfig,
+  baseUrl: string,
 ): Promise<AgentSdrStatusSnapshot | null> => {
-  // Try Agent_SDR hardware_status first (actual backend format)
-  const hwSnapshot = await fetchHardwareStatus(config);
+  // Try Agent_SDR hardware_status first
+  const hwSnapshot = await fetchHardwareStatus(baseUrl);
   if (hwSnapshot) return hwSnapshot;
 
   // Fall back to generic status endpoints
-  for (const path of STATUS_PATHS.slice(1)) {
-    const snapshot = await fetchGenericStatus(config, path);
+  for (let i = 1; i < STATUS_PATHS.length; i++) {
+    const snapshot = await fetchGenericStatus(baseUrl, STATUS_PATHS[i]);
     if (snapshot) return snapshot;
   }
   return null;
 };
 
+// ── Multi-backend merge ────────────────────────────────────────────────────
+
+/**
+ * Pick the best agent snapshot across all backends.
+ * Priority: connected > any non-fallback
+ */
+const pickAgent = (
+  snapshots: AgentSdrStatusSnapshot[],
+  agentKey: "usrp" | "rag",
+): AgentSdrAgentSnapshot => {
+  for (const s of snapshots) {
+    if (s.agents[agentKey].connected) return s.agents[agentKey];
+  }
+  for (const s of snapshots) {
+    // Return first non-fallback (differentiated by task not matching fallback)
+    if (s.agents[agentKey].task !== fallbackAgents[agentKey].task) {
+      return s.agents[agentKey];
+    }
+  }
+  // Last resort: fallback
+  return fallbackAgents[agentKey];
+};
+
+const mergeSnapshots = (
+  snapshots: AgentSdrStatusSnapshot[],
+  baseUrls: string[],
+): AgentSdrStatusSnapshot => {
+  if (snapshots.length === 0) {
+    return buildOfflineSnapshot(baseUrls[0] ?? "http://127.0.0.1:8000", "No backends configured.");
+  }
+
+  return {
+    connected: snapshots.some((s) => s.connected),
+    checkedAt: snapshots
+      .map((s) => s.checkedAt)
+      .sort()
+      .reverse()[0] ?? new Date().toISOString(),
+    baseUrls,
+    eventStreamAvailable: snapshots.some((s) => s.eventStreamAvailable === true)
+      ? true
+      : snapshots.every((s) => s.eventStreamAvailable === false)
+        ? false
+        : null,
+    error:
+      snapshots
+        .map((s) => s.error)
+        .filter((e): e is string => e !== null)
+        .join(" | ") || null,
+    agents: {
+      usrp: pickAgent(snapshots, "usrp"),
+      rag: pickAgent(snapshots, "rag"),
+    },
+  };
+};
+
+// ── GET handler ─────────────────────────────────────────────────────────────
+
 export async function GET() {
   const config = loadAgentSdrConfig();
-  const snapshot = await fetchStatusSnapshot(config);
 
-  return NextResponse.json(
-    snapshot ??
-      buildOfflineSnapshot(
-        config,
-        `Agent_SDR backend is not reachable at ${config.baseUrl}.`,
-      ),
-    {
-      headers: { "Cache-Control": "no-store" },
-    },
+  const results = await Promise.allSettled(
+    config.baseUrls.map((baseUrl) => fetchStatusSnapshot(baseUrl)),
   );
+
+  const snapshots: AgentSdrStatusSnapshot[] = [];
+  for (let i = 0; i < config.baseUrls.length; i++) {
+    const result = results[i];
+    if (result.status === "fulfilled" && result.value) {
+      snapshots.push(result.value);
+    } else {
+      const reason =
+        result.status === "rejected"
+          ? result.reason instanceof Error
+            ? result.reason.message
+            : String(result.reason)
+          : `Agent_SDR backend unreachable at ${config.baseUrls[i]}`;
+      snapshots.push(buildOfflineSnapshot(config.baseUrls[i], reason));
+    }
+  }
+
+  const merged = mergeSnapshots(snapshots, config.baseUrls);
+
+  return NextResponse.json(merged, {
+    headers: { "Cache-Control": "no-store" },
+  });
 }
