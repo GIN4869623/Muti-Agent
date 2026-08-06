@@ -22,6 +22,8 @@ import {
   MessageSquareText,
   Network,
   PackageCheck,
+  PanelTopClose,
+  PanelTopOpen,
   RadioTower,
   Radar,
   Route,
@@ -359,6 +361,7 @@ export default function CommandCenterPage() {
     eventStreamConnected,
     eventReceiverConnected,
     backendConnected,
+    risConnected,
   } = useAgentSdrLive();
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId>("usrp");
   const [chatMessage, setChatMessage] = useState("帮我扫频并判断当前最适合通信的频点");
@@ -368,6 +371,8 @@ export default function CommandCenterPage() {
   const [registeredMcpServers, setRegisteredMcpServers] = useState<RegisteredMcpServerView[]>([]);
   const [registeredSkills, setRegisteredSkills] = useState<RegisteredSkillView[]>([]);
   const [registryDialog, setRegistryDialog] = useState<RegistryDialog>(null);
+  const [knowledgePanelOpen, setKnowledgePanelOpen] = useState(false);
+  const [knowledgeTab, setKnowledgeTab] = useState<"chat" | "mcp" | "skill">("chat");
 
   const agents = useMemo<AgentRecord[]>(
     () =>
@@ -619,6 +624,12 @@ export default function CommandCenterPage() {
             />
             {hasAnyLiveConnection ? "Agent_SDR 已连接" : "等待 Agent_SDR"}
           </div>
+          <div className={styles.systemState}>
+            <span
+              className={`${styles.liveDot} ${risConnected ? "" : styles.liveDotOffline}`}
+            />
+            {risConnected ? "RIS 已连接" : "等待 RIS"}
+          </div>
           <button className={styles.iconButton} type="button" aria-label="查看通知">
             <Bell />
             <span className={styles.notificationDot} />
@@ -656,106 +667,6 @@ export default function CommandCenterPage() {
               );
             })}
           </div>
-
-          <div className={styles.controlPlane}>
-            <div className={styles.controlPanel}>
-              <div className={styles.controlPanelHeader}>
-                <MessageSquareText aria-hidden="true" />
-                <div>
-                  <strong>Claude Code 对话调度</strong>
-                  <span>POST /api/claude-code/chat</span>
-                </div>
-              </div>
-              <textarea
-                className={styles.controlTextarea}
-                value={chatMessage}
-                onChange={(event) => setChatMessage(event.target.value)}
-                rows={4}
-              />
-              <button className={styles.actionButton} type="button" onClick={submitClaudeChat}>
-                <Send aria-hidden="true" />
-                提交业务请求
-              </button>
-            </div>
-
-            <div className={styles.controlPanel}>
-              <div className={styles.controlPanelHeader}>
-                <Cable aria-hidden="true" />
-                <div>
-                  <strong>MCP Server 注册</strong>
-                  <span>POST /api/mcp/invoke</span>
-                </div>
-              </div>
-              <textarea
-                className={styles.controlTextarea}
-                value={mcpConfig}
-                onChange={(event) => setMcpConfig(event.target.value)}
-                rows={7}
-              />
-              <div className={styles.controlActions}>
-                <label className={styles.fileButton}>
-                  <UploadCloud aria-hidden="true" />
-                  上传 JSON
-                  <input
-                    type="file"
-                    accept=".json,.mcp,.txt"
-                    onChange={(event) => readTextFile(event, setMcpConfig)}
-                  />
-                </label>
-                <button
-                  className={styles.viewButton}
-                  type="button"
-                  onClick={() => void openRegistryDialog("mcp")}
-                >
-                  <List aria-hidden="true" />
-                  查看
-                </button>
-                <button className={styles.actionButton} type="button" onClick={registerMcp}>
-                  登记 MCP
-                </button>
-              </div>
-            </div>
-
-            <div className={styles.controlPanel}>
-              <div className={styles.controlPanelHeader}>
-                <PackageCheck aria-hidden="true" />
-                <div>
-                  <strong>Claude Code Skill 注册</strong>
-                  <span>POST /api/skills/run</span>
-                </div>
-              </div>
-              <textarea
-                className={styles.controlTextarea}
-                value={skillContent}
-                onChange={(event) => setSkillContent(event.target.value)}
-                rows={7}
-              />
-              <div className={styles.controlActions}>
-                <label className={styles.fileButton}>
-                  <UploadCloud aria-hidden="true" />
-                  上传 SKILL.md
-                  <input
-                    type="file"
-                    accept=".md,.txt"
-                    onChange={(event) => readTextFile(event, setSkillContent)}
-                  />
-                </label>
-                <button
-                  className={styles.viewButton}
-                  type="button"
-                  onClick={() => void openRegistryDialog("skill")}
-                >
-                  <List aria-hidden="true" />
-                  查看
-                </button>
-                <button className={styles.actionButton} type="button" onClick={registerSkill}>
-                  登记 Skill
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className={styles.controlStatus}>{controlStatus}</div>
 
           {registryDialog ? (
             <div
@@ -832,7 +743,7 @@ export default function CommandCenterPage() {
             </div>
           ) : null}
 
-          <div className={styles.agentRing}>
+          <div className={`${styles.agentRing} ${knowledgePanelOpen ? styles.agentRingPanelOpen : ""}`}>
             {/* SVG: agent ring — triangular mesh */}
             <svg className={styles.ringSvg} viewBox="0 0 100 100" preserveAspectRatio="none">
               {/* 网络监管底部 → 编排器左沿 */}
@@ -884,14 +795,10 @@ export default function CommandCenterPage() {
               const selected = agent.id === selectedAgentId;
               const ringClass =
                 agent.id === "usrp" ? styles.ringNodeUsrp : styles.ringNodeRag;
-              return (
-                <button
-                  key={agent.id}
-                  type="button"
-                  className={`${styles.ringNode} ${ringClass} ${selected ? styles.ringNodeActive : ""} ${agent.working ? styles.ringNodeWorking : ""}`}
-                  onClick={() => setSelectedAgentId(agent.id)}
-                  aria-pressed={selected}
-                >
+              const isRag = agent.id === "rag";
+
+              const nodeContent = (
+                <>
                   <span
                     className={`${styles.ringNodeDot} ${
                       agent.connected ? "" : styles.ringNodeDotOffline
@@ -915,11 +822,203 @@ export default function CommandCenterPage() {
                   <div className={styles.ringNodeTask}>
                     {agent.working ? agent.task : agent.status}
                   </div>
+                </>
+              );
+
+              if (isRag) {
+                return (
+                  <div
+                    key={agent.id}
+                    className={styles.ragNodeWrap}
+                  >
+                    <button
+                      type="button"
+                      className={`${styles.ringNode} ${styles.ringNodeInner} ${selected ? styles.ringNodeActive : ""} ${agent.working ? styles.ringNodeWorking : ""}`}
+                      onClick={() => setSelectedAgentId(agent.id)}
+                      aria-pressed={selected}
+                    >
+                      {nodeContent}
+                    </button>
+
+                    <button
+                      type="button"
+                      className={styles.ragPanelToggle}
+                      aria-expanded={knowledgePanelOpen}
+                      onClick={() => setKnowledgePanelOpen((open) => !open)}
+                    >
+                      {knowledgePanelOpen ? (
+                        <>
+                          <PanelTopClose aria-hidden="true" />
+                          收纳接入面板
+                        </>
+                      ) : (
+                        <>
+                          <PanelTopOpen aria-hidden="true" />
+                          展开接入面板
+                        </>
+                      )}
+                    </button>
+
+                    {knowledgePanelOpen ? (
+                      <div className={styles.ragPanel}>
+                        <div className={styles.ragPanelTabs} role="tablist" aria-label="知识智能体接入面板">
+                          <button
+                            type="button"
+                            role="tab"
+                            aria-selected={knowledgeTab === "chat"}
+                            className={`${styles.ragPanelTab} ${knowledgeTab === "chat" ? styles.ragPanelTabActive : ""}`}
+                            onClick={() => setKnowledgeTab("chat")}
+                          >
+                            <MessageSquareText aria-hidden="true" />
+                            对话调度
+                          </button>
+                          <button
+                            type="button"
+                            role="tab"
+                            aria-selected={knowledgeTab === "mcp"}
+                            className={`${styles.ragPanelTab} ${knowledgeTab === "mcp" ? styles.ragPanelTabActive : ""}`}
+                            onClick={() => setKnowledgeTab("mcp")}
+                          >
+                            <Cable aria-hidden="true" />
+                            MCP 注册
+                          </button>
+                          <button
+                            type="button"
+                            role="tab"
+                            aria-selected={knowledgeTab === "skill"}
+                            className={`${styles.ragPanelTab} ${knowledgeTab === "skill" ? styles.ragPanelTabActive : ""}`}
+                            onClick={() => setKnowledgeTab("skill")}
+                          >
+                            <PackageCheck aria-hidden="true" />
+                            Skill 注册
+                          </button>
+                        </div>
+
+                        <div className={styles.ragPanelBody}>
+                          {knowledgeTab === "chat" ? (
+                            <>
+                              <div className={styles.controlPanelHeader}>
+                                <MessageSquareText aria-hidden="true" />
+                                <div>
+                                  <strong>Claude Code 对话调度</strong>
+                                  <span>POST /api/claude-code/chat</span>
+                                </div>
+                              </div>
+                              <textarea
+                                className={styles.controlTextarea}
+                                value={chatMessage}
+                                onChange={(event) => setChatMessage(event.target.value)}
+                                rows={4}
+                              />
+                              <button
+                                className={styles.actionButton}
+                                type="button"
+                                onClick={submitClaudeChat}
+                              >
+                                <Send aria-hidden="true" />
+                                提交业务请求
+                              </button>
+                            </>
+                          ) : knowledgeTab === "mcp" ? (
+                            <>
+                              <div className={styles.controlPanelHeader}>
+                                <Cable aria-hidden="true" />
+                                <div>
+                                  <strong>MCP Server 注册</strong>
+                                  <span>POST /api/mcp/invoke</span>
+                                </div>
+                              </div>
+                              <textarea
+                                className={styles.controlTextarea}
+                                value={mcpConfig}
+                                onChange={(event) => setMcpConfig(event.target.value)}
+                                rows={7}
+                              />
+                              <div className={styles.controlActions}>
+                                <label className={styles.fileButton}>
+                                  <UploadCloud aria-hidden="true" />
+                                  上传 JSON
+                                  <input
+                                    type="file"
+                                    accept=".json,.mcp,.txt"
+                                    onChange={(event) => readTextFile(event, setMcpConfig)}
+                                  />
+                                </label>
+                                <button
+                                  className={styles.viewButton}
+                                  type="button"
+                                  onClick={() => void openRegistryDialog("mcp")}
+                                >
+                                  <List aria-hidden="true" />
+                                  查看
+                                </button>
+                                <button className={styles.actionButton} type="button" onClick={registerMcp}>
+                                  登记 MCP
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className={styles.controlPanelHeader}>
+                                <PackageCheck aria-hidden="true" />
+                                <div>
+                                  <strong>Claude Code Skill 注册</strong>
+                                  <span>POST /api/skills/run</span>
+                                </div>
+                              </div>
+                              <textarea
+                                className={styles.controlTextarea}
+                                value={skillContent}
+                                onChange={(event) => setSkillContent(event.target.value)}
+                                rows={7}
+                              />
+                              <div className={styles.controlActions}>
+                                <label className={styles.fileButton}>
+                                  <UploadCloud aria-hidden="true" />
+                                  上传 SKILL.md
+                                  <input
+                                    type="file"
+                                    accept=".md,.txt"
+                                    onChange={(event) => readTextFile(event, setSkillContent)}
+                                  />
+                                </label>
+                                <button
+                                  className={styles.viewButton}
+                                  type="button"
+                                  onClick={() => void openRegistryDialog("skill")}
+                                >
+                                  <List aria-hidden="true" />
+                                  查看
+                                </button>
+                                <button className={styles.actionButton} type="button" onClick={registerSkill}>
+                                  登记 Skill
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }
+
+              return (
+                <button
+                  key={agent.id}
+                  type="button"
+                  className={`${styles.ringNode} ${ringClass} ${selected ? styles.ringNodeActive : ""} ${agent.working ? styles.ringNodeWorking : ""}`}
+                  onClick={() => setSelectedAgentId(agent.id)}
+                  aria-pressed={selected}
+                >
+                  {nodeContent}
                 </button>
               );
             })}
 
           </div>
+
+          <div className={styles.controlStatus}>{controlStatus}</div>
         </section>
 
         {/* ─── Unified Orchestrator ─── */}

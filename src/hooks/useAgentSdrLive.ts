@@ -64,6 +64,12 @@ export function useAgentSdrLive() {
   const [eventStreamConnected, setEventStreamConnected] = useState(false);
   const [eventReceiverConnected, setEventReceiverConnected] = useState(false);
   const [backendConnected, setBackendConnected] = useState(false);
+  const [risConnected, setRisConnected] = useState(false);
+
+  const risBaseUrl =
+    typeof window !== "undefined"
+      ? process.env.NEXT_PUBLIC_RIS_BASE_URL?.trim() || "http://192.168.1.132:8000"
+      : "http://192.168.1.132:8000";
 
   useEffect(() => {
     let disposed = false;
@@ -88,6 +94,30 @@ export function useAgentSdrLive() {
       window.clearInterval(timer);
     };
   }, []);
+
+  // ── RIS 健康轮询（独立于 Agent_SDR，前端直连） ──
+  useEffect(() => {
+    let disposed = false;
+
+    const checkRis = async () => {
+      try {
+        const response = await fetch(`${risBaseUrl}/api/health`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(1_500),
+        });
+        if (!disposed) setRisConnected(response.ok);
+      } catch {
+        if (!disposed) setRisConnected(false);
+      }
+    };
+
+    void checkRis();
+    const timer = window.setInterval(() => void checkRis(), 5_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [risBaseUrl]);
 
   useEffect(() => {
     const source = new EventSource("/api/integrations/agent-events");
@@ -155,5 +185,6 @@ export function useAgentSdrLive() {
     eventStreamConnected,
     eventReceiverConnected,
     backendConnected,
+    risConnected,
   };
 }
