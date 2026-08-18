@@ -40,9 +40,9 @@
   position: sticky;
   z-index: 20;
   top: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: center;
   min-height: 40px;
   padding: 0 20px;
   border-bottom: 1px solid var(--cc-border);
@@ -52,9 +52,11 @@
 }
 
 .brand {
+  grid-column: 2;
+  justify-self: center;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 18px;
 }
 
 .brandMark {
@@ -70,19 +72,29 @@
 
 .brandMark svg { width: 15px; height: 15px; }
 
-.brandTitle { font-size: 14px; font-weight: 700; letter-spacing: 0.08em; }
+.brandTitle {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  background: linear-gradient(90deg, var(--cc-cyan) 0%, #dffaff 45%, #ffffff 62%, var(--cc-cyan) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: var(--cc-text);
+  filter: drop-shadow(0 0 12px rgb(52 214 244 / 0.32));
+}
 
 .brandSubtitle {
   font-family: var(--font-mono), monospace;
-  letter-spacing: 0.12em;
-  margin-top: 3px;
-  color: #668397;
+  letter-spacing: 0.16em;
+  margin-top: 4px;
+  color: #7d99ac;
   font-size: 10px;
 }
 
 .headerActions {
-  position: absolute;
-  right: 24px;
+  grid-column: 3;
+  justify-self: end;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1281,29 +1293,29 @@
 }
 
 .header {
-  min-height: 56px;
+  min-height: 64px;
   padding: 0 28px;
 }
 
 .brandMark {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
   animation: brandSignal 3.2s ease-in-out infinite;
 }
 
 .brandMark svg {
-  width: 21px;
-  height: 21px;
+  width: 30px;
+  height: 30px;
 }
 
 .brandTitle {
-  font-size: 17px;
-  letter-spacing: 0.04em;
+  font-size: 34px;
+  letter-spacing: 0.05em;
 }
 
 .brandSubtitle {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .systemState {
@@ -1771,16 +1783,7 @@
 /* ─── Layout refinement: aligned dashboard system ─── */
 
 .header {
-  justify-content: flex-start;
-}
-
-.brand {
-  width: min(1440px, calc(100vw - 56px));
-  margin: 0 auto;
-}
-
-.headerActions {
-  right: max(28px, calc((100vw - 1440px) / 2 + 28px));
+  justify-content: center;
 }
 
 .main {
@@ -1942,16 +1945,11 @@
 
 @media (max-width: 820px) {
   .header {
-    justify-content: flex-start;
     padding: 8px 14px;
   }
 
   .brandSubtitle {
     display: none;
-  }
-
-  .headerActions {
-    right: 14px;
   }
 
   .systemState {
@@ -2001,11 +1999,29 @@
 
 @media (max-width: 520px) {
   .header {
+    display: flex;
+    justify-content: space-between;
     min-height: 52px;
   }
 
+  .brand {
+    gap: 10px;
+  }
+
+  .brandMark {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+  }
+
+  .brandMark svg {
+    width: 17px;
+    height: 17px;
+  }
+
   .brandTitle {
-    max-width: 13rem;
+    font-size: 18px;
+    max-width: 12rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

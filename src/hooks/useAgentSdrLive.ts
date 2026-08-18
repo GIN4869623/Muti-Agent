@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   isAgentSdrActivityEvent,
@@ -66,6 +66,21 @@ export function useAgentSdrLive() {
   const [backendConnected, setBackendConnected] = useState(false);
   const [risConnected, setRisConnected] = useState(false);
 
+  /** 上一次状态轮询的 connected(用于检测"后端由离线恢复在线"边沿)。 */
+  const previousConnectedRef = useRef<boolean | null>(null);
+
+  /** 提示服务端确保业务事件连接(MCP SSE 桥)已打开,幂等。 */
+  const nudgeEnsure = useCallback(async () => {
+    try {
+      await fetch("/api/integrations/agent-sdr/ensure", {
+        method: "POST",
+        cache: "no-store",
+      });
+    } catch {
+      // 提示失败不影响状态轮询,下次边沿/兜底会再试。
+    }
+  }, []);
+
   const risBaseUrl =
     typeof window !== "undefined"
       ? process.env.NEXT_PUBLIC_RIS_BASE_URL?.trim() || "http://192.168.1.132:8000"
@@ -81,7 +96,13 @@ export function useAgentSdrLive() {
         });
         if (!response.ok) return;
         const next = (await response.json()) as AgentSdrStatusSnapshot;
-        if (!disposed) setSnapshot(next);
+        if (disposed) return;
+        setSnapshot(next);
+        // 指示灯亮(后端由离线恢复在线)→ 提示后端打开/确保业务事件连接
+        if (next.connected && previousConnectedRef.current === false) {
+          void nudgeEnsure();
+        }
+        previousConnectedRef.current = next.connected;
       } catch {
         // The last successful snapshot remains visible until the next polling attempt.
       }
@@ -93,7 +114,7 @@ export function useAgentSdrLive() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [nudgeEnsure]);
 
   // ── RIS 健康轮询（独立于 Agent_SDR，前端直连） ──
   useEffect(() => {
@@ -162,12 +183,21 @@ export function useAgentSdrLive() {
       }
     };
     source.onerror = () => {
+      // 不调用 source.close():EventSource 规范自带无限自动重连,
+      // 连接恢复后 onopen / 首个心跳会重新置位连接标记。
       setEventReceiverConnected(false);
       setEventStreamConnected(false);
-      source.close();
     };
     return () => source.close();
   }, []);
+
+  // 兜底:后端在线但业务事件桥尚未连上 → 周期性提示后端确保连接
+  // (backendConnected 由 SSE 帧驱动;不能用 eventStreamConnected——它会因 15s 心跳恒为 true)
+  useEffect(() => {
+    if (!snapshot?.connected || backendConnected) return;
+    const timer = window.setInterval(() => void nudgeEnsure(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [snapshot?.connected, backendConnected, nudgeEnsure]);
 
   const agents = useMemo(() => {
     if (!snapshot) return null;

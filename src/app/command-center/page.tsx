@@ -402,10 +402,6 @@ export default function CommandCenterPage() {
     ? formatEventTime(agentSdrSnapshot.checkedAt)
     : "连接中";
 
-  const currentBusinessRequest =
-    liveActivityEvents.find((event) => event.request?.trim())?.request?.trim() ||
-    "等待远端智能体上报业务请求";
-
   const hasStatusConnection = agentSdrSnapshot?.connected === true;
   // 指示灯 = 状态轮询（可靠，≤3s 延迟）或 收到业务事件（秒级响应）
   const hasAnyLiveConnection = hasStatusConnection || backendConnected;
@@ -457,13 +453,9 @@ export default function CommandCenterPage() {
     [liveActivityEvents],
   );
 
-  const coordinatorActivity = liveActivityEvents.find(
-    (event) => event.agentId === "supervisor",
-  );
-  const coordinatorSubtitle =
-    coordinatorActivity?.task?.trim() ||
-    coordinatorActivity?.detail?.trim() ||
-    "按业务类型路由到 Claude Chat / MCP / Skill";
+  // 当前业务请求 = 正在执行中的业务(与 activeServices 同一套"活动"判定);
+  // 没有活动业务时显示"无业务请求",而不是已结束/陈旧的任务文本。
+  const currentBusinessRequest = activeServices[0]?.name?.trim() || "无业务请求";
 
   const serviceLayerState = activeServices.length > 0 ? "执行业务中" : "无执行中业务";
 
@@ -820,7 +812,8 @@ export default function CommandCenterPage() {
                     ))}
                   </div>
                   <div className={styles.ringNodeTask}>
-                    {agent.working ? agent.task : agent.status}
+                    {/* 真实接入前暂不显示请求文本，统一显示连接状态占位 */}
+                    已连接
                   </div>
                 </>
               );
@@ -1028,7 +1021,6 @@ export default function CommandCenterPage() {
             <BotMessageSquare aria-hidden="true" className={styles.unifiedOrchIcon} />
             <div className={styles.unifiedOrchInfo}>
               <strong>协同编排智能体</strong>
-              <span>{coordinatorSubtitle}</span>
             </div>
           </div>
           <div className={styles.unifiedOrchAgents}>
@@ -1043,7 +1035,8 @@ export default function CommandCenterPage() {
                 />
                 <div className={styles.unifiedOrchAgentInfo}>
                   <strong>{agent.name}</strong>
-                  <span>{agent.working ? agent.task : agent.status}</span>
+                  {/* 真实接入前统一显示"已连接";接入后改为按 agent.connected 显示实际状态 */}
+                  <span>已连接</span>
                 </div>
               </div>
             ))}
@@ -1143,7 +1136,7 @@ export default function CommandCenterPage() {
             {activeServices.length === 0 ? (
               <div className={styles.emptyServiceState}>
                 <Activity aria-hidden="true" />
-                <strong>当前没有真实业务执行</strong>
+                <strong>当前无业务</strong>
                 <span>业务到达后，这里会按 run 动态生成执行节点；完成后节点自动退出当前层。</span>
               </div>
             ) : null}
