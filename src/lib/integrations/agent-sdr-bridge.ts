@@ -6,18 +6,26 @@
 //   - 探测失败 && 桥未处于 disconnected → 半开/卡住连接,强制重启;
 //   - 探测成功 && 桥处于 disconnected → 后端已恢复,立即重开加速恢复(不等退避)。
 
-import { loadAgentSdrConfig } from "@/lib/integrations/agent-sdr-config";
+import {
+  loadAgentBackendTargets,
+  type AgentBackendKind,
+  type AgentBackendTarget,
+} from "@/lib/integrations/agent-backend-config";
 import { startAgentSdrMcpClient } from "@/lib/integrations/agent-sdr-mcp-client";
 
 type BridgeStatus = "connecting" | "connected" | "disconnected";
 
 type BridgeState = {
+  backendId: string;
+  kind: AgentBackendKind;
   gen: number;
   status: BridgeStatus;
   dispose: () => void;
 };
 
 type BridgeStatusChange = {
+  backendId: string;
+  kind: AgentBackendKind;
   baseUrl: string;
   connected: boolean;
 };
@@ -63,7 +71,8 @@ const ensureProbeStarted = (): void => {
   }, PROBE_INTERVAL_MS);
 };
 
-export const ensureAgentSdrBridge = (baseUrl: string): void => {
+export const ensureAgentSdrBridge = (target: AgentBackendTarget): void => {
+  const { backendId, kind, baseUrl } = target;
   const registry = getRegistry();
   const existing = registry.bridges.get(baseUrl);
   if (existing && existing.status !== "disconnected") return;
@@ -72,7 +81,13 @@ export const ensureAgentSdrBridge = (baseUrl: string): void => {
   if (existing) existing.dispose();
 
   const gen = (existing?.gen ?? 0) + 1;
-  const state: BridgeState = { gen, status: "connecting", dispose: () => {} };
+  const state: BridgeState = {
+    backendId,
+    kind,
+    gen,
+    status: "connecting",
+    dispose: () => {},
+  };
   registry.bridges.set(baseUrl, state);
 
   state.dispose = startAgentSdrMcpClient(baseUrl, {
@@ -80,13 +95,13 @@ export const ensureAgentSdrBridge = (baseUrl: string): void => {
       const current = registry.bridges.get(baseUrl);
       if (!current || current.gen !== gen) return;
       current.status = "connected";
-      emit({ baseUrl, connected: true });
+      emit({ backendId, kind, baseUrl, connected: true });
     },
     onDisconnect: () => {
       const current = registry.bridges.get(baseUrl);
       if (!current || current.gen !== gen) return;
       current.status = "disconnected";
-      emit({ baseUrl, connected: false });
+      emit({ backendId, kind, baseUrl, connected: false });
     },
   });
 
@@ -97,12 +112,22 @@ export const ensureAgentSdrBridge = (baseUrl: string): void => {
 const forceRestartBridge = (baseUrl: string): void => {
   const registry = getRegistry();
   const existing = registry.bridges.get(baseUrl);
+  const target = existing
+    ? { backendId: existing.backendId, kind: existing.kind, baseUrl }
+    : loadAgentBackendTargets().find((item) => item.baseUrl === baseUrl);
   if (existing) {
-    if (existing.status === "connected") emit({ baseUrl, connected: false });
+    if (existing.status === "connected") {
+      emit({
+        backendId: existing.backendId,
+        kind: existing.kind,
+        baseUrl,
+        connected: false,
+      });
+    }
     existing.dispose();
     registry.bridges.delete(baseUrl);
   }
-  ensureAgentSdrBridge(baseUrl);
+  if (target) ensureAgentSdrBridge(target);
 };
 
 /** 健康探测:定期探活所有桥,打破半开连接并加速恢复。 */
@@ -140,7 +165,8 @@ const probeBridges = async (): Promise<void> => {
 };
 
 export const ensureAllAgentSdrBridges = (): void => {
-  const baseUrls = loadAgentSdrConfig().baseUrls;
+  const targets = loadAgentBackendTargets();
+  const baseUrls = targets.map((target) => target.baseUrl);
 
   // 回收:dispose 已不在配置里的桥(config 变更时防泄漏)
   const registry = getRegistry();
@@ -151,17 +177,21 @@ export const ensureAllAgentSdrBridges = (): void => {
     }
   }
 
-  for (const baseUrl of baseUrls) {
-    ensureAgentSdrBridge(baseUrl);
+  for (const target of targets) {
+    ensureAgentSdrBridge(target);
   }
 };
 
 export const getAgentSdrBridgeStatus = (): Array<{
+  backendId: string;
+  kind: AgentBackendKind;
   baseUrl: string;
   connected: boolean;
 }> => {
   const registry = getRegistry();
   return [...registry.bridges.entries()].map(([baseUrl, state]) => ({
+    backendId: state.backendId,
+    kind: state.kind,
     baseUrl,
     connected: state.status === "connected",
   }));

@@ -7,31 +7,17 @@ import {
   registerMcpServer,
 } from "@/lib/orchestration/control-plane";
 import { publishAgentActivity } from "@/lib/integrations/agent-event-hub";
-import { loadAgentSdrConfig } from "@/lib/integrations/agent-sdr-config";
+import { findAgentBackend } from "@/lib/integrations/agent-backend-config";
+import {
+  AGENT_SDR_TOOLS,
+  RIS_AGENT_TOOLS,
+  resolveToolAgentId,
+} from "@/lib/integrations/agent-tool-routing";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // ── Agent_SDR backend integration ──────────────────────────────────────────
-
-const getPrimaryBackendUrl = (): string | null => {
-  const config = loadAgentSdrConfig();
-  return config.baseUrls[0] ?? null;
-};
-
-/** Available MCP tools on the Agent_SDR backend. */
-const AGENT_SDR_TOOLS = new Set([
-  "perform_physical_scan",
-  "tone_loopback_visualize",
-  "stop_hardware_task",
-  "text_fsk_send_and_receive",
-  "adaptive_modulation_transmit",
-  "auto_optimal_transmit",
-  "start_video_stream",
-  "stop_video_stream",
-  "video_stream_status",
-  "search_sdr_knowledge",
-]);
 
 export async function GET() {
   return NextResponse.json(
@@ -84,10 +70,71 @@ export async function POST(request: Request) {
   const toolName = typeof record.toolName === "string" ? record.toolName : "mcp_tool";
   const toolArgs =
     record.args && typeof record.args === "object" ? (record.args as Record<string, unknown>) : {};
-  const backendUrl = getPrimaryBackendUrl();
+  const requestedAgentId =
+    typeof record.targetAgentId === "string" ? record.targetAgentId : undefined;
+  const targetAgentId = resolveToolAgentId(toolName, requestedAgentId ?? "supervisor");
+  const backend = findAgentBackend(targetAgentId);
+  const backendUrl = backend?.baseUrl ?? null;
 
-  // ── Path A: Real Agent_SDR backend available ─────────────────────────
-  if (backendUrl && AGENT_SDR_TOOLS.has(toolName)) {
+  // ── Path A: Real RIS backend available ────────────────────────────────
+  if (backendUrl && backend?.kind === "ris" && RIS_AGENT_TOOLS.has(toolName)) {
+    try {
+      publishAgentActivity({
+        type: "agent.activity",
+        agentId: "supervisor",
+        targetAgentId: "ris-agent",
+        phase: "routing",
+        runId,
+        toolName,
+        task: `路由 RIS 工具 ${toolName}`,
+        args: toolArgs,
+      });
+      const backendResponse = await fetch(`${backendUrl}/api/tools/invoke`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          name: toolName,
+          arguments: toolArgs,
+          runId,
+          task: typeof record.task === "string" ? record.task : `执行 ${toolName}`,
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+      const result = (await backendResponse.json()) as Record<string, unknown>;
+      if (!backendResponse.ok || result.success === false) {
+        return NextResponse.json(
+          {
+            runId,
+            adapterMode: "ris-error",
+            message:
+              typeof result.error === "string"
+                ? result.error
+                : `RIS 后端返回错误状态 ${backendResponse.status}`,
+            toolName,
+            backendResult: result,
+          },
+          { status: backendResponse.ok ? 422 : 502 },
+        );
+      }
+      return NextResponse.json({
+        runId,
+        adapterMode: "ris-live",
+        message: `${toolName} 已由 RIS 智能体执行。`,
+        toolName,
+        backendResult: result,
+      });
+    } catch (error) {
+      console.warn(
+        `[mcp] RIS backend unreachable at ${backendUrl}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  // ── Path B: Real Agent_SDR backend available ─────────────────────────
+  if (backendUrl && backend?.kind === "agent-sdr" && AGENT_SDR_TOOLS.has(toolName)) {
     try {
       // Build an instruction that triggers the specific tool
       const instruction = `请直接调用 ${toolName} 工具执行以下任务，不要分析或询问。
@@ -170,7 +217,7 @@ ${JSON.stringify(toolArgs, null, 2)}
     }
   }
 
-  // ── Path B: Dry-run fallback ─────────────────────────────────────────
+  // ── Path C: Dry-run fallback ─────────────────────────────────────────
   publishRunEvent({
     runId,
     agentId: "supervisor",
@@ -178,7 +225,7 @@ ${JSON.stringify(toolArgs, null, 2)}
     task: `MCP tool invoke requested: ${toolName}`,
     toolName,
     detail: backendUrl
-      ? `Agent_SDR 后端 ${backendUrl} 不可达或工具 ${toolName} 不存在，执行 dry-run。`
+      ? `${backend?.backendId ?? "智能体"} 后端 ${backendUrl} 不可达或工具 ${toolName} 不存在，执行 dry-run。`
       : "当前没有真实 MCP client runtime，因此只发布 dry-run 编排事件。",
   });
 
@@ -187,7 +234,7 @@ ${JSON.stringify(toolArgs, null, 2)}
       runId,
       adapterMode: "mcp-dry-run",
       message: backendUrl
-        ? `Agent_SDR 后端 ${backendUrl} 不可达，已执行 dry-run 回退。`
+      ? `${backend?.backendId ?? "智能体"} 后端 ${backendUrl} 不可达，已执行 dry-run 回退。`
         : "MCP 调用请求已登记，但当前未连接真实 MCP runtime。",
     },
     { status: 202 },

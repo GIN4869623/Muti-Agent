@@ -49,6 +49,8 @@ export type AgentSdrActivityEvent = {
   args?: Record<string, unknown>;
   result?: Record<string, unknown>;
   durationMs?: number;
+  delivery?: "live" | "replay";
+  clientReceivedAt?: number;
 };
 
 export const isAgentSdrActivityEvent = (value: unknown): value is AgentSdrActivityEvent => {

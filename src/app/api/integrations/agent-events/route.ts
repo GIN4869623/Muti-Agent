@@ -64,22 +64,26 @@ export async function GET(request: Request) {
       ensureAllAgentSdrBridges();
 
       // 把当前桥状态推成 backend-connected / backend-disconnected 帧
-      for (const { baseUrl, connected } of getAgentSdrBridgeStatus()) {
+      for (const { backendId, kind, baseUrl, connected } of getAgentSdrBridgeStatus()) {
         safeEnqueue(
           controller,
           encodeFrame({
             type: connected ? "backend-connected" : "backend-disconnected",
+            backendId,
+            kind,
             url: baseUrl,
           }),
         );
       }
 
       // 桥状态变化 → 转发给浏览器
-      unsubscribeBridge = subscribeToBridgeStatus(({ baseUrl, connected }) => {
+      unsubscribeBridge = subscribeToBridgeStatus(({ backendId, kind, baseUrl, connected }) => {
         safeEnqueue(
           controller,
           encodeFrame({
             type: connected ? "backend-connected" : "backend-disconnected",
+            backendId,
+            kind,
             url: baseUrl,
           }),
         );
@@ -87,10 +91,10 @@ export async function GET(request: Request) {
 
       // ── Replay + subscribe ──
       for (const event of listRecentAgentActivity().slice().reverse()) {
-        safeEnqueue(controller, encodeFrame(event));
+        safeEnqueue(controller, encodeFrame({ ...event, delivery: "replay" }));
       }
       unsubscribeActivity = subscribeToAgentActivity((event) => {
-        safeEnqueue(controller, encodeFrame(event));
+        safeEnqueue(controller, encodeFrame({ ...event, delivery: "live" }));
       });
       heartbeat = setInterval(() => {
         safeEnqueue(controller, encodeFrame({ type: "heartbeat" }));

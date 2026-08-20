@@ -8,23 +8,15 @@ import {
 } from "@/lib/orchestration/control-plane";
 import type { AgentSdrId } from "@/lib/integrations/agent-sdr";
 import { publishAgentActivity } from "@/lib/integrations/agent-event-hub";
-import { loadAgentSdrConfig } from "@/lib/integrations/agent-sdr-config";
+import { findAgentBackend } from "@/lib/integrations/agent-backend-config";
+import { resolveToolAgentId } from "@/lib/integrations/agent-tool-routing";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 // ── Agent_SDR backend integration ──────────────────────────────────────────
 
-const getPrimaryBackendUrl = (): string | null => {
-  const config = loadAgentSdrConfig();
-  return config.baseUrls[0] ?? null;
-};
-
-/** 所有工具调用统一由协同编排智能体(supervisor)编排。
-  网络监管智能体(usrp)和知识智能体(rag)是待接入的外部智能体。 */
-const toolNameToAgentId = (_name: string): AgentSdrId => {
-  return "supervisor";
-};
+const knownAgentIds = new Set(["supervisor", "usrp", "rag", "ris-agent"]);
 
 // ── POST handler ───────────────────────────────────────────────────────────
 
@@ -51,7 +43,14 @@ export async function POST(request: Request) {
       ? record.sessionId.trim()
       : "local-session";
   const runId = createRunId();
-  const backendUrl = getPrimaryBackendUrl();
+  const requestedTarget =
+    typeof record.targetAgentId === "string" && knownAgentIds.has(record.targetAgentId)
+      ? record.targetAgentId
+      : inferAgentTarget(message);
+  const targetAgentId = requestedTarget as AgentSdrId;
+  const backend = findAgentBackend(targetAgentId);
+  const backendUrl = backend?.baseUrl ?? null;
+  const downstreamAgentId = targetAgentId === "supervisor" ? "supervisor" : targetAgentId;
 
   // ── Path A: Real Agent_SDR backend available ─────────────────────────
   if (backendUrl) {
@@ -66,6 +65,7 @@ export async function POST(request: Request) {
           instruction: message,
           session_id: sessionId,
           mode: "think",
+          ...(backend?.kind === "ris" ? { runId, task: message } : {}),
         }),
         signal: AbortSignal.timeout(60_000),
       });
@@ -75,6 +75,7 @@ export async function POST(request: Request) {
         publishAgentActivity({
           type: "agent.activity",
           agentId: "supervisor",
+          targetAgentId,
           phase: "received",
           runId,
           sessionId,
@@ -123,6 +124,7 @@ export async function POST(request: Request) {
                     publishAgentActivity({
                       type: "agent.activity",
                       agentId: "supervisor",
+                      targetAgentId,
                       phase: "routing",
                       runId,
                       sessionId,
@@ -142,6 +144,7 @@ export async function POST(request: Request) {
                       publishAgentActivity({
                         type: "agent.activity",
                         agentId: "supervisor",
+                        targetAgentId,
                         phase: "routing",
                         runId,
                         sessionId,
@@ -152,7 +155,8 @@ export async function POST(request: Request) {
                     }
                     publishAgentActivity({
                       type: "agent.activity",
-                      agentId: "supervisor",
+                      agentId: downstreamAgentId,
+                      sourceAgentId: "supervisor",
                       phase: "started",
                       runId,
                       sessionId,
@@ -169,7 +173,8 @@ export async function POST(request: Request) {
                       finalReply += text;
                       publishAgentActivity({
                         type: "agent.activity",
-                        agentId: "supervisor",
+                        agentId: downstreamAgentId,
+                        sourceAgentId: "supervisor",
                         phase: "streaming",
                         runId,
                         sessionId,
@@ -184,7 +189,7 @@ export async function POST(request: Request) {
                   case "tool_call": {
                     const toolName =
                       typeof event.name === "string" ? event.name : "unknown";
-                    const agentId = toolNameToAgentId(toolName);
+                    const agentId = resolveToolAgentId(toolName, downstreamAgentId);
                     const args = event.args ?? {};
                     publishAgentActivity({
                       type: "agent.activity",
@@ -204,7 +209,7 @@ export async function POST(request: Request) {
                   case "tool_result": {
                     const toolName =
                       typeof event.name === "string" ? event.name : "unknown";
-                    const agentId = toolNameToAgentId(toolName);
+                    const agentId = resolveToolAgentId(toolName, downstreamAgentId);
                     const result = event.result as Record<string, unknown> | undefined;
                     const elapsedMs =
                       typeof event.elapsed_ms === "number"
@@ -247,7 +252,8 @@ export async function POST(request: Request) {
                     const timing = event.timing as Record<string, unknown> | undefined;
                     publishAgentActivity({
                       type: "agent.activity",
-                      agentId: "supervisor",
+                      agentId: downstreamAgentId,
+                      sourceAgentId: "supervisor",
                       phase: "completed",
                       runId,
                       sessionId,
@@ -271,7 +277,8 @@ export async function POST(request: Request) {
                         : "未知错误";
                     publishAgentActivity({
                       type: "agent.activity",
-                      agentId: "supervisor",
+                      agentId: downstreamAgentId,
+                      sourceAgentId: "supervisor",
                       phase: "failed",
                       runId,
                       sessionId,
@@ -313,11 +320,12 @@ export async function POST(request: Request) {
           {
             runId,
             sessionId,
-            adapterMode: "agent-sdr-realtime",
-            targetAgentId: "supervisor",
+            adapterMode: `${backend?.kind ?? "agent"}-realtime`,
+            targetAgentId,
             message:
-              "请求已转发到 Agent_SDR 后端，事件正通过 SSE 实时发布到控制台。",
-            agentSdr: {
+              `请求已转发到 ${backend?.kind === "ris" ? "RIS" : "Agent_SDR"} 后端，事件正通过 SSE 实时发布到控制台。`,
+            backend: {
+              id: backend?.backendId,
               backend: backendUrl,
               status: "streaming",
             },
@@ -331,21 +339,20 @@ export async function POST(request: Request) {
         {
           runId,
           sessionId,
-          adapterMode: "agent-sdr-downstream-error",
-          message: `Agent_SDR 后端返回错误状态 ${response.status}，已执行 dry-run 回退。`,
+          adapterMode: `${backend?.kind ?? "agent"}-downstream-error`,
+          message: `${backend?.kind === "ris" ? "RIS" : "Agent_SDR"} 后端返回错误状态 ${response.status}，已执行 dry-run 回退。`,
         },
         { headers: { "Cache-Control": "no-store" } },
       );
     } catch (error) {
       // Backend unreachable — log and fall through to dry-run
       console.warn(
-        `[chat] Agent_SDR backend unreachable at ${backendUrl}: ${error instanceof Error ? error.message : String(error)}`,
+        `[chat] ${backend?.backendId ?? "agent"} backend unreachable at ${backendUrl}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
 
   // ── Path B: Dry-run fallback (original behavior) ─────────────────────
-  const targetAgentId = inferAgentTarget(message);
   const toolName = inferToolName(message);
 
   publishRunEvent({
@@ -379,8 +386,8 @@ export async function POST(request: Request) {
       task: "等待真实 Claude Code adapter 执行业务工具",
       toolName,
       detail: backendUrl
-        ? `Agent_SDR 后端 ${backendUrl} 不可达，执行 dry-run 回退。`
-        : "当前为 dry-run 编排事件；未配置 AGENT_SDR_BASE_URLS。",
+        ? `${backend?.backendId ?? "智能体"} 后端 ${backendUrl} 不可达，执行 dry-run 回退。`
+        : `当前为 dry-run 编排事件；未配置 ${targetAgentId === "ris-agent" ? "RIS_AGENT_BASE_URL" : "AGENT_SDR_BASE_URLS"}。`,
     });
   }
 
@@ -395,12 +402,14 @@ export async function POST(request: Request) {
         entry: "Claude Code Agent SDK query(...) or local claude CLI adapter",
         expectedEndpoint: "POST /api/claude-code/chat",
         nextStep: backendUrl
-          ? `Agent_SDR backend ${backendUrl} returned an error — check if the service is running.`
-          : "Set AGENT_SDR_BASE_URLS to connect a real Agent_SDR backend.",
+          ? `${backend?.backendId ?? "Agent"} backend ${backendUrl} returned an error — check if the service is running.`
+          : targetAgentId === "ris-agent"
+            ? "Set RIS_AGENT_BASE_URL to connect the RIS backend."
+            : "Set AGENT_SDR_BASE_URLS to connect a real Agent_SDR backend.",
       },
       message: backendUrl
-        ? `Agent_SDR 后端 ${backendUrl} 不可达，已执行 dry-run 回退。`
-        : "请求已进入编排层。当前没有真实 Agent_SDR adapter，因此只发布可视化事件，不执行硬件或工具调用。",
+        ? `${backend?.backendId ?? "智能体"} 后端 ${backendUrl} 不可达，已执行 dry-run 回退。`
+        : "请求已进入编排层。当前没有目标智能体 adapter，因此只发布可视化事件，不执行硬件或工具调用。",
     },
     { status: 202 },
   );

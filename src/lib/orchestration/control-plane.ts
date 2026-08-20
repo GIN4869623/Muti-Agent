@@ -184,12 +184,20 @@ export const registerSkill = async (payload: unknown): Promise<RegisteredSkill> 
 };
 
 export const inferAgentTarget = (message: string): AgentSdrId => {
-  // 网络监管智能体(usrp)和知识智能体(rag)是待接入的外部智能体，
-  // 当前所有内部业务路由统一经过协同编排智能体(supervisor)。
+  if (/\bRIS\b|反射面|定点扫描|周期扫描|区域扫描|跟踪扫描|常规模式|相位复位/i.test(message)) {
+    return "ris-agent";
+  }
+  if (/知识|检索|解释|rag/i.test(message)) return "rag";
+  if (/USRP|扫频|频谱|tone|单音|发射|调制|频点/i.test(message)) return "usrp";
   return "supervisor";
 };
 
 export const inferToolName = (message: string): string => {
+  if (/常规模式.*停止|停止.*常规模式/i.test(message)) return "regular_mode_stop";
+  if (/常规模式/i.test(message)) return "regular_mode_start";
+  if (/跟踪扫描/i.test(message)) return "scan_track";
+  if (/周期扫描/i.test(message)) return "scan_periodic";
+  if (/定点扫描|反射面|\bRIS\b/i.test(message)) return "scan_point";
   if (/tone|单音|发射/i.test(message)) return "transmit_tone";
   if (/调制|子载波/i.test(message)) return "adaptive_modulation";
   if (/最优|频点|推荐/i.test(message)) return "find_optimal_frequency";

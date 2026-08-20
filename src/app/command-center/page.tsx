@@ -119,6 +119,7 @@ type RegistryDialog = "mcp" | "skill" | null;
 const agentNameRegistry: Record<string, string> = {
   usrp: "网络监管智能体",
   rag: "知识智能体",
+  "ris-agent": "RIS智能体",
   supervisor: "协同编排智能体",
 };
 
@@ -275,6 +276,54 @@ const serviceCatalog: ServiceDefinition[] = [
     icon: Route,
   },
   {
+    id: "ris-point-scan",
+    name: "RIS定点扫描",
+    agentId: "ris-agent",
+    agentName: "RIS智能体",
+    trigger: "MCP Tool",
+    toolName: "scan_point",
+    description: "控制指定 RIS 面板朝目标坐标执行定点扫描。",
+    status: "pending",
+    accent: "cyan",
+    icon: ScanSearch,
+  },
+  {
+    id: "ris-periodic-scan",
+    name: "RIS周期扫描",
+    agentId: "ris-agent",
+    agentName: "RIS智能体",
+    trigger: "MCP Tool",
+    toolName: "scan_periodic",
+    description: "按照配置周期持续扫描目标位置，并在任务停止时结束活动状态。",
+    status: "pending",
+    accent: "cyan",
+    icon: Radar,
+  },
+  {
+    id: "ris-track-scan",
+    name: "RIS跟踪扫描",
+    agentId: "ris-agent",
+    agentName: "RIS智能体",
+    trigger: "Function Call",
+    toolName: "scan_track",
+    description: "结合 UWB 坐标持续跟踪目标并调整 RIS 指向。",
+    status: "pending",
+    accent: "cyan",
+    icon: Route,
+  },
+  {
+    id: "ris-regular-mode",
+    name: "RIS常规模式",
+    agentId: "ris-agent",
+    agentName: "RIS智能体",
+    trigger: "Skill",
+    toolName: "regular_mode_start",
+    description: "启动 RIS 常规模式并持续维护现场链路。",
+    status: "pending",
+    accent: "cyan",
+    icon: Network,
+  },
+  {
     id: "knowledge-lookup",
     name: "物理层知识检索",
     agentId: "rag",
@@ -346,6 +395,10 @@ const bizPositions = [
   { x: 72, y: 68, sx: 76, sy: 70 },
 ];
 
+const SERVICE_COMPLETION_HOLD_MS = 3_000;
+const ACTIVE_SERVICE_PHASES = new Set(["received", "routing", "started", "tool_started", "streaming"]);
+const TERMINAL_SERVICE_PHASES = new Set(["tool_completed", "completed", "failed"]);
+
 const formatEventTime = (value: string | undefined): string => {
   if (!value) return new Date().toLocaleTimeString("zh-CN", { hour12: false });
   const parsed = new Date(value);
@@ -373,6 +426,7 @@ export default function CommandCenterPage() {
   const [registryDialog, setRegistryDialog] = useState<RegistryDialog>(null);
   const [knowledgePanelOpen, setKnowledgePanelOpen] = useState(false);
   const [knowledgeTab, setKnowledgeTab] = useState<"chat" | "mcp" | "skill">("chat");
+  const [serviceLayerNow, setServiceLayerNow] = useState(0);
 
   const agents = useMemo<AgentRecord[]>(
     () =>
@@ -402,30 +456,65 @@ export default function CommandCenterPage() {
     ? formatEventTime(agentSdrSnapshot.checkedAt)
     : "连接中";
 
-  const hasStatusConnection = agentSdrSnapshot?.connected === true;
+  const hasStatusConnection =
+    liveAgentSdrAgents?.usrp?.connected === true ||
+    liveAgentSdrAgents?.rag?.connected === true;
   // 指示灯 = 状态轮询（可靠，≤3s 延迟）或 收到业务事件（秒级响应）
   const hasAnyLiveConnection = hasStatusConnection || backendConnected;
 
+  useEffect(() => {
+    const now = Date.now();
+    const nextExpiry = liveActivityEvents.reduce<number | null>((nearest, event) => {
+      if (
+        !TERMINAL_SERVICE_PHASES.has(event.phase) ||
+        event.delivery !== "live" ||
+        typeof event.clientReceivedAt !== "number"
+      ) {
+        return nearest;
+      }
+      const expiry = event.clientReceivedAt + SERVICE_COMPLETION_HOLD_MS;
+      if (expiry <= now) return nearest;
+      return nearest === null ? expiry : Math.min(nearest, expiry);
+    }, null);
+
+    if (nextExpiry === null) return;
+    const timer = window.setTimeout(
+      () => setServiceLayerNow(Date.now()),
+      Math.max(0, nextExpiry - now + 25),
+    );
+    return () => window.clearTimeout(timer);
+  }, [liveActivityEvents, serviceLayerNow]);
+
   const activeServices = useMemo(
     () => {
-      const activePhases = new Set(["received", "routing", "started", "tool_started", "streaming"]);
-      const terminalPhases = new Set(["tool_completed", "completed", "failed"]);
-
-      // Collect runIds that have reached a terminal phase — their nodes should disappear
-      const completedRunIds = new Set(
-        liveActivityEvents
-          .filter((e) => terminalPhases.has(e.phase) && e.agentId !== "supervisor" && e.runId)
-          .map((e) => e.runId!),
-      );
+      const terminalByRun = new Map<string, (typeof liveActivityEvents)[number]>();
+      for (const event of liveActivityEvents) {
+        if (
+          event.runId &&
+          event.agentId !== "supervisor" &&
+          TERMINAL_SERVICE_PHASES.has(event.phase) &&
+          !terminalByRun.has(event.runId)
+        ) {
+          terminalByRun.set(event.runId, event);
+        }
+      }
 
       // Deduplicate by (agentId + runId) so the same tool execution only shows one node
       const seen = new Set<string>();
 
       return liveActivityEvents
         .filter((event) => {
-          if (!activePhases.has(event.phase)) return false;
+          if (!ACTIVE_SERVICE_PHASES.has(event.phase)) return false;
           if (event.agentId === "supervisor") return false;
-          if (event.runId && completedRunIds.has(event.runId)) return false;
+          const terminalEvent = event.runId ? terminalByRun.get(event.runId) : undefined;
+          if (terminalEvent) {
+            const holdUntil =
+              terminalEvent.delivery === "live" &&
+              typeof terminalEvent.clientReceivedAt === "number"
+                ? terminalEvent.clientReceivedAt + SERVICE_COMPLETION_HOLD_MS
+                : 0;
+            if (serviceLayerNow >= holdUntil) return false;
+          }
           const dedupKey = `${event.agentId}|${event.runId ?? event.eventId ?? ""}`;
           if (seen.has(dedupKey)) return false;
           seen.add(dedupKey);
@@ -433,6 +522,7 @@ export default function CommandCenterPage() {
         })
         .slice(0, 6)
         .map<ServiceDefinition>((event, index) => {
+          const terminalEvent = event.runId ? terminalByRun.get(event.runId) : undefined;
           const matched =
             serviceCatalog.find((service) => service.toolName === event.toolName) ??
             serviceCatalog.find((service) => service.agentId === event.agentId) ??
@@ -444,13 +534,13 @@ export default function CommandCenterPage() {
             name: event.task?.trim() || event.toolName?.trim() || matched.name,
             agentId: event.agentId,
             agentName: agentNameRegistry[event.agentId] ?? event.agentId,
-            status: "running",
+            status: terminalEvent ? "completed" : "running",
             toolName: event.toolName?.trim() || matched.toolName,
-            description: event.detail?.trim() || matched.description,
+            description: terminalEvent?.detail?.trim() || event.detail?.trim() || matched.description,
           };
         });
     },
-    [liveActivityEvents],
+    [liveActivityEvents, serviceLayerNow],
   );
 
   // 当前业务请求 = 正在执行中的业务(与 activeServices 同一套"活动"判定);
@@ -525,7 +615,7 @@ export default function CommandCenterPage() {
       const response = await fetch("/api/claude-code/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: "agent-sdr-local", message }),
+        body: JSON.stringify({ sessionId: "agent-router-local", message }),
       });
       const result = (await response.json()) as { runId?: string; error?: string; message?: string };
       setControlStatus(
@@ -785,8 +875,7 @@ export default function CommandCenterPage() {
               const AgentIcon = agent.icon;
               const AgentLocationIcon = agent.locationIcon;
               const selected = agent.id === selectedAgentId;
-              const ringClass =
-                agent.id === "usrp" ? styles.ringNodeUsrp : styles.ringNodeRag;
+              const ringClass = agent.id === "usrp" ? styles.ringNodeUsrp : styles.ringNodeRag;
               const isRag = agent.id === "rag";
 
               const nodeContent = (
@@ -812,8 +901,7 @@ export default function CommandCenterPage() {
                     ))}
                   </div>
                   <div className={styles.ringNodeTask}>
-                    {/* 真实接入前暂不显示请求文本，统一显示连接状态占位 */}
-                    已连接
+                    {agent.working ? agent.task : agent.connected ? agent.status : "未连接"}
                   </div>
                 </>
               );
@@ -842,19 +930,19 @@ export default function CommandCenterPage() {
                       {knowledgePanelOpen ? (
                         <>
                           <PanelTopClose aria-hidden="true" />
-                          收纳接入面板
+                          收纳交互面板
                         </>
                       ) : (
                         <>
                           <PanelTopOpen aria-hidden="true" />
-                          展开接入面板
+                          展开交互面板
                         </>
                       )}
                     </button>
 
                     {knowledgePanelOpen ? (
                       <div className={styles.ragPanel}>
-                        <div className={styles.ragPanelTabs} role="tablist" aria-label="知识智能体接入面板">
+                        <div className={styles.ragPanelTabs} role="tablist" aria-label="智能体交互面板">
                           <button
                             type="button"
                             role="tab"
@@ -893,7 +981,7 @@ export default function CommandCenterPage() {
                               <div className={styles.controlPanelHeader}>
                                 <MessageSquareText aria-hidden="true" />
                                 <div>
-                                  <strong>Claude Code 对话调度</strong>
+                                  <strong>{selectedAgent.name} 对话调度</strong>
                                   <span>POST /api/claude-code/chat</span>
                                 </div>
                               </div>
@@ -1035,8 +1123,7 @@ export default function CommandCenterPage() {
                 />
                 <div className={styles.unifiedOrchAgentInfo}>
                   <strong>{agent.name}</strong>
-                  {/* 真实接入前统一显示"已连接";接入后改为按 agent.connected 显示实际状态 */}
-                  <span>已连接</span>
+                  <span>{agent.working ? agent.task : agent.connected ? agent.status : "未连接"}</span>
                 </div>
               </div>
             ))}

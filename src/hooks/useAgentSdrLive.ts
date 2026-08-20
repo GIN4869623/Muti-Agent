@@ -63,8 +63,7 @@ export function useAgentSdrLive() {
   >({});
   const [eventStreamConnected, setEventStreamConnected] = useState(false);
   const [eventReceiverConnected, setEventReceiverConnected] = useState(false);
-  const [backendConnected, setBackendConnected] = useState(false);
-  const [risConnected, setRisConnected] = useState(false);
+  const [connectedBackendIds, setConnectedBackendIds] = useState<string[]>([]);
 
   /** 上一次状态轮询的 connected(用于检测"后端由离线恢复在线"边沿)。 */
   const previousConnectedRef = useRef<boolean | null>(null);
@@ -80,11 +79,6 @@ export function useAgentSdrLive() {
       // 提示失败不影响状态轮询,下次边沿/兜底会再试。
     }
   }, []);
-
-  const risBaseUrl =
-    typeof window !== "undefined"
-      ? process.env.NEXT_PUBLIC_RIS_BASE_URL?.trim() || "http://192.168.1.132:8000"
-      : "http://192.168.1.132:8000";
 
   useEffect(() => {
     let disposed = false;
@@ -116,30 +110,6 @@ export function useAgentSdrLive() {
     };
   }, [nudgeEnsure]);
 
-  // ── RIS 健康轮询（独立于 Agent_SDR，前端直连） ──
-  useEffect(() => {
-    let disposed = false;
-
-    const checkRis = async () => {
-      try {
-        const response = await fetch(`${risBaseUrl}/api/health`, {
-          cache: "no-store",
-          signal: AbortSignal.timeout(1_500),
-        });
-        if (!disposed) setRisConnected(response.ok);
-      } catch {
-        if (!disposed) setRisConnected(false);
-      }
-    };
-
-    void checkRis();
-    const timer = window.setInterval(() => void checkRis(), 5_000);
-    return () => {
-      disposed = true;
-      window.clearInterval(timer);
-    };
-  }, [risBaseUrl]);
-
   useEffect(() => {
     const source = new EventSource("/api/integrations/agent-events");
     source.onopen = () => setEventReceiverConnected(true);
@@ -158,24 +128,42 @@ export function useAgentSdrLive() {
 
         // MCP 客户端连通性事件（agent-events/route.ts 直推）
         if (record.type === "backend-connected") {
-          setBackendConnected(true);
+          const backendId =
+            typeof record.backendId === "string"
+              ? record.backendId
+              : typeof record.url === "string"
+                ? record.url
+                : "unknown";
+          setConnectedBackendIds((current) =>
+            current.includes(backendId) ? current : [...current, backendId],
+          );
           return;
         }
         if (record.type === "backend-disconnected") {
-          setBackendConnected(false);
+          const backendId =
+            typeof record.backendId === "string"
+              ? record.backendId
+              : typeof record.url === "string"
+                ? record.url
+                : "unknown";
+          setConnectedBackendIds((current) => current.filter((id) => id !== backendId));
           return;
         }
 
         // 业务事件
         if (!isAgentSdrActivityEvent(parsed)) return;
+        const receivedEvent: AgentSdrActivityEvent = {
+          ...parsed,
+          clientReceivedAt: Date.now(),
+        };
         setEventStreamConnected(true);
-        setEvents((current) => [parsed, ...current].slice(0, 30));
+        setEvents((current) => [receivedEvent, ...current].slice(0, 30));
         setActivityByAgent((current) => ({
           ...current,
-          [parsed.agentId]: {
-            working: ACTIVE_PHASES.has(parsed.phase),
-            status: resolveEventStatus(parsed),
-            task: resolveEventTask(parsed),
+          [receivedEvent.agentId]: {
+            working: ACTIVE_PHASES.has(receivedEvent.phase),
+            status: resolveEventStatus(receivedEvent),
+            task: resolveEventTask(receivedEvent),
           },
         }));
       } catch {
@@ -194,10 +182,10 @@ export function useAgentSdrLive() {
   // 兜底:后端在线但业务事件桥尚未连上 → 周期性提示后端确保连接
   // (backendConnected 由 SSE 帧驱动;不能用 eventStreamConnected——它会因 15s 心跳恒为 true)
   useEffect(() => {
-    if (!snapshot?.connected || backendConnected) return;
+    if (!snapshot?.connected || connectedBackendIds.length > 0) return;
     const timer = window.setInterval(() => void nudgeEnsure(), 15_000);
     return () => window.clearInterval(timer);
-  }, [snapshot?.connected, backendConnected, nudgeEnsure]);
+  }, [snapshot?.connected, connectedBackendIds.length, nudgeEnsure]);
 
   const agents = useMemo(() => {
     if (!snapshot) return null;
@@ -208,6 +196,10 @@ export function useAgentSdrLive() {
     return result;
   }, [activityByAgent, snapshot]);
 
+  const backendConnected = connectedBackendIds.some((id) => id.startsWith("agent-sdr"));
+  const risConnected =
+    agents?.["ris-agent"]?.connected === true || connectedBackendIds.includes("ris-agent");
+
   return {
     snapshot,
     agents,
@@ -216,5 +208,6 @@ export function useAgentSdrLive() {
     eventReceiverConnected,
     backendConnected,
     risConnected,
+    connectedBackendIds,
   };
 }

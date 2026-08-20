@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { loadAgentSdrConfig } from "@/lib/integrations/agent-sdr-config";
+import { loadAgentBackendTargets } from "@/lib/integrations/agent-backend-config";
 import type {
   AgentSdrAgentSnapshot,
   AgentSdrId,
@@ -39,6 +39,20 @@ const fallbackAgents: Record<"usrp" | "rag", AgentSdrAgentSnapshot> = {
       { label: "运行模型", value: "--" },
     ],
   },
+};
+
+const fallbackRisAgent: AgentSdrAgentSnapshot = {
+  id: "ris-agent",
+  connected: false,
+  working: false,
+  status: "待连接",
+  task: "等待 RIS 智能体上报",
+  location: "C4 节点 · 未配置",
+  metrics: [
+    { label: "后端服务", value: "--" },
+    { label: "智能体", value: "--" },
+    { label: "运行模型", value: "--" },
+  ],
 };
 
 const buildOfflineSnapshot = (
@@ -119,7 +133,6 @@ const normalizeHardwareStatusToSnapshot = (
   baseUrl: string,
   healthInfo: Record<string, unknown> | null,
 ): AgentSdrStatusSnapshot => {
-  const serverIp = typeof hwStatus.server_ip === "string" ? hwStatus.server_ip : "---";
   const usrpIp = typeof hwStatus.usrp_01_ip === "string"
     ? hwStatus.usrp_01_ip
     : baseUrl;
@@ -274,12 +287,83 @@ const fetchStatusSnapshot = async (
   const hwSnapshot = await fetchHardwareStatus(baseUrl);
   if (hwSnapshot) return hwSnapshot;
 
-  // Fall back to generic status endpoints
-  for (let i = 1; i < STATUS_PATHS.length; i++) {
-    const snapshot = await fetchGenericStatus(baseUrl, STATUS_PATHS[i]);
-    if (snapshot) return snapshot;
+  // Fall back to generic status endpoints in parallel so one unavailable path
+  // does not multiply the status polling latency.
+  const fallbacks = await Promise.all(
+    STATUS_PATHS.slice(1).map((path) => fetchGenericStatus(baseUrl, path)),
+  );
+  return fallbacks.find((snapshot) => snapshot !== null) ?? null;
+};
+
+const fetchRisStatusSnapshot = async (
+  baseUrl: string,
+): Promise<AgentSdrStatusSnapshot> => {
+  try {
+    const healthResponse = await fetch(`${baseUrl}/api/health`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(1_500),
+    });
+    if (!healthResponse.ok) {
+      throw new Error(`RIS health returned HTTP ${healthResponse.status}`);
+    }
+
+    const health = (await healthResponse.json()) as Record<string, unknown>;
+    const ready = typeof health.ready === "boolean" ? health.ready : true;
+    let provider = "--";
+    try {
+      const statusResponse = await fetch(`${baseUrl}/api/agent/status`, {
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(1_200),
+      });
+      if (statusResponse.ok) {
+        const status = (await statusResponse.json()) as Record<string, unknown>;
+        if (typeof status.orchestrator === "string" && status.orchestrator.trim()) {
+          provider = status.orchestrator.trim();
+        }
+      }
+    } catch {
+      // Health remains authoritative; model diagnostics are optional metrics.
+    }
+
+    return {
+      connected: true,
+      checkedAt: new Date().toISOString(),
+      baseUrls: [baseUrl],
+      eventStreamAvailable: true,
+      error: null,
+      agents: {
+        "ris-agent": {
+          id: "ris-agent",
+          connected: true,
+          working: false,
+          status: ready ? "就绪" : "初始化中",
+          task: ready ? "空闲待命" : "等待 RIS 智能体初始化",
+          location: `C4 节点 · ${baseUrl}`,
+          metrics: [
+            { label: "后端服务", value: "online" },
+            { label: "智能体", value: ready ? "ready" : "starting" },
+            { label: "运行模型", value: provider },
+          ],
+        },
+      },
+    };
+  } catch (error) {
+    return {
+      connected: false,
+      checkedAt: new Date().toISOString(),
+      baseUrls: [baseUrl],
+      eventStreamAvailable: false,
+      error: error instanceof Error ? error.message : String(error),
+      agents: {
+        "ris-agent": {
+          ...fallbackRisAgent,
+          location: `C4 节点 · ${baseUrl}`,
+        },
+      },
+    };
   }
-  return null;
 };
 
 // ── Multi-backend merge ────────────────────────────────────────────────────
@@ -340,14 +424,19 @@ const mergeSnapshots = (
 // ── GET handler ─────────────────────────────────────────────────────────────
 
 export async function GET() {
-  const config = loadAgentSdrConfig();
+  const targets = loadAgentBackendTargets();
+  const agentSdrUrls = targets
+    .filter((target) => target.kind === "agent-sdr")
+    .map((target) => target.baseUrl);
+  const risTarget = targets.find((target) => target.kind === "ris");
 
-  const results = await Promise.allSettled(
-    config.baseUrls.map((baseUrl) => fetchStatusSnapshot(baseUrl)),
-  );
+  const [results, risSnapshot] = await Promise.all([
+    Promise.allSettled(agentSdrUrls.map((baseUrl) => fetchStatusSnapshot(baseUrl))),
+    risTarget ? fetchRisStatusSnapshot(risTarget.baseUrl) : Promise.resolve(null),
+  ]);
 
   const snapshots: AgentSdrStatusSnapshot[] = [];
-  for (let i = 0; i < config.baseUrls.length; i++) {
+  for (let i = 0; i < agentSdrUrls.length; i++) {
     const result = results[i];
     if (result.status === "fulfilled" && result.value) {
       snapshots.push(result.value);
@@ -357,12 +446,25 @@ export async function GET() {
           ? result.reason instanceof Error
             ? result.reason.message
             : String(result.reason)
-          : `Agent_SDR backend unreachable at ${config.baseUrls[i]}`;
-      snapshots.push(buildOfflineSnapshot(config.baseUrls[i], reason));
+          : `Agent_SDR backend unreachable at ${agentSdrUrls[i]}`;
+      snapshots.push(buildOfflineSnapshot(agentSdrUrls[i], reason));
     }
   }
 
-  const merged = mergeSnapshots(snapshots, config.baseUrls);
+  const merged = mergeSnapshots(snapshots, agentSdrUrls);
+  if (risTarget && risSnapshot) {
+    merged.connected = merged.connected || risSnapshot.connected;
+    merged.checkedAt = [merged.checkedAt, risSnapshot.checkedAt].sort().reverse()[0];
+    merged.baseUrls = [...agentSdrUrls, risTarget.baseUrl];
+    merged.eventStreamAvailable =
+      merged.eventStreamAvailable === true || risSnapshot.eventStreamAvailable === true
+        ? true
+        : merged.eventStreamAvailable === false && risSnapshot.eventStreamAvailable === false
+          ? false
+          : null;
+    merged.error = [merged.error, risSnapshot.error].filter(Boolean).join(" | ") || null;
+    merged.agents["ris-agent"] = risSnapshot.agents["ris-agent"];
+  }
 
   return NextResponse.json(merged, {
     headers: { "Cache-Control": "no-store" },
