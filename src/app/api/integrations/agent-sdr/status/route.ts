@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { loadAgentBackendTargets } from "@/lib/integrations/agent-backend-config";
+import { isTcpPortOpen } from "@/lib/integrations/tcp-port";
 import type {
   AgentSdrAgentSnapshot,
   AgentSdrId,
@@ -150,11 +151,6 @@ const normalizeHardwareStatusToSnapshot = (
       : {};
 
   // ── USRP agent ──
-  const uhdAvailable =
-    typeof diagnostics.uhd_available === "boolean"
-      ? diagnostics.uhd_available
-      : false;
-
   const usrpWorking = visualizationActive;
   const usrpTask = usrpWorking
     ? "Tone 可视化运行中"
@@ -162,7 +158,7 @@ const normalizeHardwareStatusToSnapshot = (
         (hwStatus.video_stream as Record<string, unknown>).active
       ? "视频流传输中"
       : "空闲待命";
-  const usrpStatus = uhdAvailable ? "就绪" : "离线";
+  const usrpStatus = "就绪";
 
   const centerFreq =
     typeof diagnostics.center_freq === "number"
@@ -191,7 +187,7 @@ const normalizeHardwareStatusToSnapshot = (
 
   const usrpAgent: AgentSdrAgentSnapshot = {
     id: "usrp",
-    connected: uhdAvailable,
+    connected: true,
     working: usrpWorking,
     status: usrpStatus,
     task: usrpTask,
@@ -282,17 +278,36 @@ const fetchGenericStatus = async (
 
 const fetchStatusSnapshot = async (
   baseUrl: string,
-): Promise<AgentSdrStatusSnapshot | null> => {
-  // Try Agent_SDR hardware_status first
-  const hwSnapshot = await fetchHardwareStatus(baseUrl);
-  if (hwSnapshot) return hwSnapshot;
+): Promise<AgentSdrStatusSnapshot> => {
+  const portOpen = await isTcpPortOpen(baseUrl);
+  if (!portOpen) return buildOfflineSnapshot(baseUrl, `USRP service port unreachable at ${baseUrl}`);
 
-  // Fall back to generic status endpoints in parallel so one unavailable path
-  // does not multiply the status polling latency.
-  const fallbacks = await Promise.all(
-    STATUS_PATHS.slice(1).map((path) => fetchGenericStatus(baseUrl, path)),
-  );
-  return fallbacks.find((snapshot) => snapshot !== null) ?? null;
+  // Existing HTTP diagnostics provide optional metrics, never the online decision.
+  let details = await fetchHardwareStatus(baseUrl);
+  if (!details) {
+    const fallbacks = await Promise.all(
+      STATUS_PATHS.slice(1).map((path) => fetchGenericStatus(baseUrl, path)),
+    );
+    details = fallbacks.find((snapshot) => snapshot !== null) ?? null;
+  }
+  const snapshot = details ?? buildOfflineSnapshot(baseUrl, "");
+  const usrp = snapshot.agents.usrp;
+  return {
+    ...snapshot,
+    connected: true,
+    checkedAt: new Date().toISOString(),
+    error: null,
+    agents: {
+      ...snapshot.agents,
+      usrp: {
+        ...usrp,
+        connected: true,
+        status: usrp.working ? "工作中" : "就绪",
+        task: usrp.working ? usrp.task : "空闲待命",
+        location: `网络监管服务 · ${new URL(baseUrl).host}`,
+      },
+    },
+  };
 };
 
 const fetchRisStatusSnapshot = async (

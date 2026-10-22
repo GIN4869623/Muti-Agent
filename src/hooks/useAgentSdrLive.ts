@@ -45,7 +45,7 @@ const mergeActivity = (
   snapshot: AgentSdrAgentSnapshot,
   activity: AgentActivityState | undefined,
 ): AgentSdrAgentSnapshot => {
-  if (!activity) return snapshot;
+  if (!activity || (snapshot.id === "usrp" && !snapshot.connected)) return snapshot;
   return {
     ...snapshot,
     // connected 只由状态轮询决定，activity 事件只更新 working/status/task
@@ -82,13 +82,17 @@ export function useAgentSdrLive() {
 
   useEffect(() => {
     let disposed = false;
+    let inFlight = false;
 
     const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const response = await fetch("/api/integrations/agent-sdr/status", {
           cache: "no-store",
+          signal: AbortSignal.timeout(5000),
         });
-        if (!response.ok) return;
+        if (!response.ok) throw new Error("Status polling failed");
         const next = (await response.json()) as AgentSdrStatusSnapshot;
         if (disposed) return;
         setSnapshot(next);
@@ -98,7 +102,17 @@ export function useAgentSdrLive() {
         }
         previousConnectedRef.current = next.connected;
       } catch {
-        // The last successful snapshot remains visible until the next polling attempt.
+        if (!disposed) {
+          setSnapshot((current) => current ? {
+            ...current,
+            agents: {
+              ...current.agents,
+              usrp: { ...current.agents.usrp, connected: false, working: false, status: "未连接", task: "等待端口检测恢复" },
+            },
+          } : null);
+        }
+      } finally {
+        inFlight = false;
       }
     };
 

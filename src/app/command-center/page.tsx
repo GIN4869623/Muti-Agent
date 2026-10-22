@@ -4,8 +4,8 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
-  type ChangeEvent,
   type ComponentType,
 } from "react";
 import {
@@ -15,22 +15,19 @@ import {
   Bot,
   BotMessageSquare,
   BrainCircuit,
-  Cable,
   CheckCircle2,
   Clock3,
-  List,
+  GripHorizontal,
   MessageSquareText,
   Network,
   PackageCheck,
-  PanelTopClose,
-  PanelTopOpen,
+  PanelRightClose,
+  PanelRightOpen,
   RadioTower,
   Radar,
   Route,
   ScanSearch,
-  Send,
   Sparkles,
-  UploadCloud,
   Wifi,
   Workflow,
   X,
@@ -38,6 +35,14 @@ import {
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useAgentSdrLive } from "@/hooks/useAgentSdrLive";
+import { useKnowledgeLive } from "@/hooks/useKnowledgeLive";
+import { useDraggablePanel } from "@/hooks/useDraggablePanel";
+import { getKnowledgeLink } from "@/lib/integrations/knowledge-routing";
+import type { KnowledgeModelProfile } from "@/lib/integrations/knowledge-answer";
+import { useKnowledgeAnswer } from "@/hooks/useKnowledgeAnswer";
+import { KnowledgeQueryContent } from "@/components/knowledge-query-content";
+import { isKnowledgeActivityTool } from "@/lib/integrations/knowledge-activity";
+import { KnowledgeTransfer } from "@/components/knowledge-transfer";
 
 import styles from "./command-center.module.css";
 
@@ -92,28 +97,6 @@ type ServiceDefinition = {
   accent: "cyan" | "violet";
   icon: ComponentType<{ className?: string }>;
 };
-
-type RegisteredMcpServerView = {
-  id: string;
-  name: string;
-  transport: "stdio" | "http";
-  command?: string;
-  args?: string[];
-  url?: string;
-  tools: string[];
-  createdAt: string;
-  configPath: string;
-};
-
-type RegisteredSkillView = {
-  id: string;
-  name: string;
-  description: string;
-  createdAt: string;
-  filePath: string;
-};
-
-type RegistryDialog = "mcp" | "skill" | null;
 
 /** agentId → 中文名称映射，新接入的智能体在这里加一行即可。 */
 const agentNameRegistry: Record<string, string> = {
@@ -349,31 +332,6 @@ const serviceCatalog: ServiceDefinition[] = [
   },
 ];
 
-const sampleMcpConfig = `{
-  "name": "agent-sdr-usrp",
-  "command": "python",
-  "args": ["-m", "agent_sdr.mcp_server"],
-  "tools": [
-    "scan_spectrum",
-    "transmit_tone",
-    "adaptive_modulation",
-    "find_optimal_frequency"
-  ]
-}`;
-
-const sampleSkillContent = `---
-name: agent-sdr-scan-diagnosis
-description: Diagnose an Agent_SDR physical-layer issue by planning scan, knowledge lookup, and next action.
----
-
-# Agent_SDR Scan Diagnosis
-
-Use Claude Code to coordinate:
-1. Parse the user's physical-layer request.
-2. Route spectrum tasks to network monitoring tools backed by USRP hardware.
-3. Route explanations to the RAG knowledge tool.
-4. Return a concise diagnosis with evidence and next action.`;
-
 const statusLabel: Record<ServiceStatus, string> = {
   running: "执行中",
   completed: "已完成",
@@ -413,25 +371,49 @@ export default function CommandCenterPage() {
     events: liveActivityEvents,
     eventStreamConnected,
     eventReceiverConnected,
-    backendConnected,
     risConnected,
   } = useAgentSdrLive();
+  const knowledge = useKnowledgeLive(liveActivityEvents);
   const [selectedAgentId, setSelectedAgentId] = useState<AgentId>("usrp");
-  const [chatMessage, setChatMessage] = useState("帮我扫频并判断当前最适合通信的频点");
-  const [mcpConfig, setMcpConfig] = useState(sampleMcpConfig);
-  const [skillContent, setSkillContent] = useState(sampleSkillContent);
-  const [controlStatus, setControlStatus] = useState("Claude Code 控制面待命");
-  const [registeredMcpServers, setRegisteredMcpServers] = useState<RegisteredMcpServerView[]>([]);
-  const [registeredSkills, setRegisteredSkills] = useState<RegisteredSkillView[]>([]);
-  const [registryDialog, setRegistryDialog] = useState<RegistryDialog>(null);
+  const [knowledgeSender, setKnowledgeSender] = useState("编排智能体");
+  const [knowledgeModelProfile, setKnowledgeModelProfile] = useState<KnowledgeModelProfile>("local");
+  const [chatMessage, setChatMessage] = useState("物联网智能体有哪些能力？");
+  const knowledgeAnswer = useKnowledgeAnswer();
+  const controlStatus = knowledgeAnswer.status;
   const [knowledgePanelOpen, setKnowledgePanelOpen] = useState(false);
-  const [knowledgeTab, setKnowledgeTab] = useState<"chat" | "mcp" | "skill">("chat");
+  const [knowledgeTab, setKnowledgeTab] = useState<"chat" | "content">("chat");
   const [serviceLayerNow, setServiceLayerNow] = useState(0);
+
+  const knowledgePanelRef = useRef<HTMLElement>(null);
+  const knowledgePanelToggleRef = useRef<HTMLButtonElement>(null);
+  const knowledgePanelDrag = useDraggablePanel(
+    knowledgePanelRef, knowledgePanelOpen, "command-center.knowledge-panel-position.v1",
+  );
+  const closeKnowledgePanel = useCallback(() => {
+    setKnowledgePanelOpen(false);
+    knowledgePanelToggleRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useEffect(() => {
+    if (knowledgePanelOpen) knowledgePanelRef.current?.focus({ preventScroll: true });
+  }, [knowledgePanelOpen]);
+
+  useEffect(() => {
+    if (!knowledgePanelOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeKnowledgePanel();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [knowledgePanelOpen, closeKnowledgePanel]);
 
   const agents = useMemo<AgentRecord[]>(
     () =>
       baseAgents.map((agent) => {
-        const liveAgent = liveAgentSdrAgents?.[agent.id];
+        const liveAgent = agent.id === "rag" ? knowledge.agent : liveAgentSdrAgents?.[agent.id];
         if (!liveAgent) return agent;
         return {
           ...agent,
@@ -444,7 +426,7 @@ export default function CommandCenterPage() {
           dataSource: liveAgent.connected ? "live" : "sample",
         };
       }),
-    [liveAgentSdrAgents],
+    [liveAgentSdrAgents, knowledge.agent],
   );
 
   const selectedAgent = useMemo(
@@ -452,15 +434,13 @@ export default function CommandCenterPage() {
     [agents, selectedAgentId],
   );
 
-  const statusCheckedAt = agentSdrSnapshot
-    ? formatEventTime(agentSdrSnapshot.checkedAt)
-    : "连接中";
+  const statusCheckedAt = knowledge.checkedAt
+    ? formatEventTime(knowledge.checkedAt)
+    : agentSdrSnapshot ? formatEventTime(agentSdrSnapshot.checkedAt) : "连接中";
 
   const hasStatusConnection =
-    liveAgentSdrAgents?.usrp?.connected === true ||
-    liveAgentSdrAgents?.rag?.connected === true;
-  // 指示灯 = 状态轮询（可靠，≤3s 延迟）或 收到业务事件（秒级响应）
-  const hasAnyLiveConnection = hasStatusConnection || backendConnected;
+    liveAgentSdrAgents?.usrp?.connected === true;
+  // USRP online indicators are driven only by the server-side TCP port probe.
 
   useEffect(() => {
     const now = Date.now();
@@ -505,7 +485,7 @@ export default function CommandCenterPage() {
       return liveActivityEvents
         .filter((event) => {
           if (!ACTIVE_SERVICE_PHASES.has(event.phase)) return false;
-          if (event.agentId === "supervisor") return false;
+          if (event.agentId === "supervisor" || isKnowledgeActivityTool(event.toolName)) return false;
           const terminalEvent = event.runId ? terminalByRun.get(event.runId) : undefined;
           if (terminalEvent) {
             const holdUntil =
@@ -545,140 +525,11 @@ export default function CommandCenterPage() {
 
   // 当前业务请求 = 正在执行中的业务(与 activeServices 同一套"活动"判定);
   // 没有活动业务时显示"无业务请求",而不是已结束/陈旧的任务文本。
-  const currentBusinessRequest = activeServices[0]?.name?.trim() || "无业务请求";
+  const currentBusinessRequest = knowledge.agent.working ? "知识检索" : activeServices[0]?.name?.trim() || "无业务请求";
 
   const serviceLayerState = activeServices.length > 0 ? "执行业务中" : "无执行中业务";
 
-  const refreshRegistries = useCallback(async () => {
-    try {
-      const [mcpResponse, skillResponse] = await Promise.all([
-        fetch("/api/mcp/invoke", { cache: "no-store" }),
-        fetch("/api/skills/run", { cache: "no-store" }),
-      ]);
-      let mcpCount = 0;
-      let skillCount = 0;
-      if (mcpResponse.ok) {
-        const data = (await mcpResponse.json()) as { servers?: RegisteredMcpServerView[] };
-        const servers = data.servers ?? [];
-        setRegisteredMcpServers(servers);
-        mcpCount = servers.length;
-      }
-      if (skillResponse.ok) {
-        const data = (await skillResponse.json()) as { skills?: RegisteredSkillView[] };
-        const skills = data.skills ?? [];
-        setRegisteredSkills(skills);
-        skillCount = skills.length;
-      }
-      return { mcpCount, skillCount };
-    } catch {
-      setControlStatus("注册表读取失败");
-      return null;
-    }
-  }, []);
-
-  const openRegistryDialog = async (type: Exclude<RegistryDialog, null>) => {
-    setControlStatus(type === "mcp" ? "正在读取 MCP 注册表..." : "正在读取 Skill 注册表...");
-    const counts = await refreshRegistries();
-    if (!counts) return;
-    setRegistryDialog(type);
-    setControlStatus(
-      type === "mcp"
-        ? `MCP 注册表已加载：${counts.mcpCount} 项`
-        : `Skill 注册表已加载：${counts.skillCount} 项`,
-    );
-  };
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => void refreshRegistries(), 0);
-    return () => window.clearTimeout(timer);
-  }, [refreshRegistries]);
-
-  const readTextFile = (
-    event: ChangeEvent<HTMLInputElement>,
-    onRead: (value: string) => void,
-  ) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") onRead(reader.result);
-    };
-    reader.readAsText(file);
-    event.target.value = "";
-  };
-
-  const submitClaudeChat = async () => {
-    const message = chatMessage.trim();
-    if (!message) return;
-    setControlStatus("正在提交到 Claude Code 对话入口...");
-    try {
-      const response = await fetch("/api/claude-code/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: "agent-router-local", message }),
-      });
-      const result = (await response.json()) as { runId?: string; error?: string; message?: string };
-      setControlStatus(
-        response.ok
-          ? `Claude Code run 已创建：${result.runId ?? "pending"}`
-          : result.error ?? "Claude Code chat 请求失败",
-      );
-    } catch {
-      setControlStatus("Claude Code chat 请求失败");
-    }
-  };
-
-  const registerMcp = async () => {
-    setControlStatus("正在登记 MCP server 配置...");
-    try {
-      const server = JSON.parse(mcpConfig) as unknown;
-      const response = await fetch("/api/mcp/invoke", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "register", server }),
-      });
-      const result = (await response.json()) as {
-        server?: RegisteredMcpServerView;
-        servers?: RegisteredMcpServerView[];
-        error?: string;
-      };
-      if (response.ok) setRegisteredMcpServers(result.servers ?? []);
-      setControlStatus(
-        response.ok
-          ? `MCP 已登记：${result.server?.name ?? "agent-sdr"} · ${result.server?.configPath ?? ".agent-control-plane/mcp-servers.json"}`
-          : result.error ?? "MCP 配置登记失败",
-      );
-    } catch {
-      setControlStatus("MCP 配置不是有效 JSON");
-    }
-  };
-
-  const registerSkill = async () => {
-    setControlStatus("正在登记 Claude Code Skill...");
-    try {
-      const response = await fetch("/api/skills/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          mode: "register",
-          skill: { content: skillContent },
-        }),
-      });
-      const result = (await response.json()) as {
-        skill?: RegisteredSkillView;
-        skills?: RegisteredSkillView[];
-        error?: string;
-      };
-      if (response.ok) setRegisteredSkills(result.skills ?? []);
-      setControlStatus(
-        response.ok
-          ? `Skill 已登记：${result.skill?.name ?? "agent-sdr-skill"} · ${result.skill?.filePath ?? ".agent-control-plane/skills"}`
-          : result.error ?? "Skill 登记失败",
-      );
-    } catch {
-      setControlStatus("Skill 登记失败");
-    }
-  };
+  const submitKnowledgeSearch = () => { void knowledgeAnswer.submit(chatMessage, knowledgeSender, knowledgeModelProfile); };
 
   return (
     <div
@@ -702,9 +553,9 @@ export default function CommandCenterPage() {
         <div className={styles.headerActions}>
           <div className={styles.systemState}>
             <span
-              className={`${styles.liveDot} ${hasAnyLiveConnection ? "" : styles.liveDotOffline}`}
+              className={`${styles.liveDot} ${hasStatusConnection ? "" : styles.liveDotOffline}`}
             />
-            {hasAnyLiveConnection ? "Agent_SDR 已连接" : "等待 Agent_SDR"}
+            {hasStatusConnection ? "Agent_SDR 已连接" : "等待 Agent_SDR"}
           </div>
           <div className={styles.systemState}>
             <span
@@ -750,82 +601,9 @@ export default function CommandCenterPage() {
             })}
           </div>
 
-          {registryDialog ? (
-            <div
-              className={styles.registryOverlay}
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="registry-dialog-title"
-              onClick={() => setRegistryDialog(null)}
-            >
-              <div className={styles.registryDialog} onClick={(event) => event.stopPropagation()}>
-                <div className={styles.registryDialogHeader}>
-                  <div className={styles.registryDialogTitle}>
-                    {registryDialog === "mcp" ? (
-                      <Cable aria-hidden="true" />
-                    ) : (
-                      <PackageCheck aria-hidden="true" />
-                    )}
-                    <div>
-                      <strong id="registry-dialog-title">
-                        {registryDialog === "mcp" ? "MCP 注册列表" : "Skill 注册列表"}
-                      </strong>
-                      <span>
-                        {registryDialog === "mcp"
-                          ? ".agent-control-plane/mcp-servers.json"
-                          : ".agent-control-plane/skills/"}
-                      </span>
-                    </div>
-                  </div>
-                  <button
-                    className={styles.dialogCloseButton}
-                    type="button"
-                    aria-label="关闭列表"
-                    onClick={() => setRegistryDialog(null)}
-                  >
-                    <X aria-hidden="true" />
-                  </button>
-                </div>
 
-                <div className={styles.registryDialogRows}>
-                  {registryDialog === "mcp" ? (
-                    registeredMcpServers.length === 0 ? (
-                      <div className={styles.registryDialogEmpty}>暂无 MCP server 登记</div>
-                    ) : (
-                      registeredMcpServers.map((server) => (
-                        <article key={server.id} className={styles.registryDialogRow}>
-                          <div>
-                            <strong>{server.name}</strong>
-                            <span>
-                              {server.transport === "http"
-                                ? server.url
-                                : [server.command, ...(server.args ?? [])].filter(Boolean).join(" ")}
-                            </span>
-                          </div>
-                          <code>{server.tools.length > 0 ? server.tools.join(", ") : "未声明 tools"}</code>
-                          <em>{server.configPath}</em>
-                        </article>
-                      ))
-                    )
-                  ) : registeredSkills.length === 0 ? (
-                    <div className={styles.registryDialogEmpty}>暂无 Claude Code Skill 登记</div>
-                  ) : (
-                    registeredSkills.map((skill) => (
-                      <article key={skill.id} className={styles.registryDialogRow}>
-                        <div>
-                          <strong>{skill.name}</strong>
-                          <span>{skill.description}</span>
-                        </div>
-                        <code>{skill.filePath}</code>
-                      </article>
-                    ))
-                  )}
-                </div>
-              </div>
-            </div>
-          ) : null}
 
-          <div className={`${styles.agentRing} ${knowledgePanelOpen ? styles.agentRingPanelOpen : ""}`}>
+          <div className={styles.agentRing}>
             {/* SVG: agent ring — triangular mesh */}
             <svg className={styles.ringSvg} viewBox="0 0 100 100" preserveAspectRatio="none">
               {/* 网络监管底部 → 编排器左沿 */}
@@ -837,9 +615,7 @@ export default function CommandCenterPage() {
               />
               {/* RAG底部 → 编排器右沿 */}
               <path
-                className={`${styles.ringPath} ${styles.ringPathRag} ${
-                  agents.find((a) => a.id === "rag")?.working ? styles.ringPathActive : ""
-                }`}
+                className={`${styles.ringPath} ${styles.ringPathRag}`}
                 d="M78 52 Q72 82 57 114"
               />
               {/* 横向互联 */}
@@ -854,21 +630,15 @@ export default function CommandCenterPage() {
               <circle className={`${styles.ringParticle} ${styles.ringParticleUsrp}`} r="0.9">
                 <animateMotion dur="3s" repeatCount="indefinite" path="M22 52 Q28 82 43 114" begin="0.8s" />
               </circle>
-              {/* Particles — RAG → 编排器 */}
-              <circle className={`${styles.ringParticle} ${styles.ringParticleRag}`} r="1.3">
-                <animateMotion dur="2.3s" repeatCount="indefinite" path="M78 52 Q72 82 57 114" />
-              </circle>
-              <circle className={`${styles.ringParticle} ${styles.ringParticleRag}`} r="0.9">
-                <animateMotion dur="2.8s" repeatCount="indefinite" path="M78 52 Q72 82 57 114" begin="1s" />
-              </circle>
-              {/* Particles — 横向互联 */}
-              <circle className={`${styles.ringParticle} ${styles.ringParticlePeer}`} r="1.2">
-                <animateMotion dur="3s" repeatCount="indefinite" path="M22 50 Q50 14 78 50" />
-              </circle>
-              <circle className={`${styles.ringParticle} ${styles.ringParticlePeer}`} r="0.9">
-                <animateMotion dur="3.6s" repeatCount="indefinite" path="M22 50 Q50 14 78 50" begin="1.5s" />
-              </circle>
+              {/* Knowledge link traffic is driven by actual search events. */}
             </svg>
+            {knowledge.transfers.some((transfer) => getKnowledgeLink(transfer.peer.id)) ? (
+              <svg className={`${styles.ringSvg} ${styles.knowledgeTrafficSvg}`} viewBox="0 0 100 100" preserveAspectRatio="none">
+                {knowledge.transfers.filter((transfer) => getKnowledgeLink(transfer.peer.id)).map((transfer) => (
+                  <KnowledgeTransfer key={transfer.id} transfer={transfer} />
+                ))}
+              </svg>
+            ) : null}
 
             {/* Agent ring nodes */}
             {agents.map((agent) => {
@@ -896,7 +666,7 @@ export default function CommandCenterPage() {
                     {agent.metrics.map((m) => (
                       <div key={m.label}>
                         <span>{m.label}</span>
-                        <strong>{m.value}</strong>
+                        <strong title={agent.id === "rag" && m.label === "检索模型" ? knowledge.modelName : undefined}>{m.value}</strong>
                       </div>
                     ))}
                   </div>
@@ -923,163 +693,32 @@ export default function CommandCenterPage() {
 
                     <button
                       type="button"
+                      ref={knowledgePanelToggleRef}
                       className={styles.ragPanelToggle}
                       aria-expanded={knowledgePanelOpen}
-                      onClick={() => setKnowledgePanelOpen((open) => !open)}
+                      aria-controls="knowledge-panel"
+                      aria-haspopup="dialog"
+                      onClick={() => { setSelectedAgentId("rag"); if (knowledgePanelOpen) closeKnowledgePanel(); else setKnowledgePanelOpen(true); }}
                     >
                       {knowledgePanelOpen ? (
                         <>
-                          <PanelTopClose aria-hidden="true" />
-                          收纳交互面板
+                          <PanelRightClose aria-hidden="true" />
+                          收起交互面板
                         </>
                       ) : (
                         <>
-                          <PanelTopOpen aria-hidden="true" />
+                          <PanelRightOpen aria-hidden="true" />
                           展开交互面板
                         </>
                       )}
                     </button>
-
-                    {knowledgePanelOpen ? (
-                      <div className={styles.ragPanel}>
-                        <div className={styles.ragPanelTabs} role="tablist" aria-label="智能体交互面板">
-                          <button
-                            type="button"
-                            role="tab"
-                            aria-selected={knowledgeTab === "chat"}
-                            className={`${styles.ragPanelTab} ${knowledgeTab === "chat" ? styles.ragPanelTabActive : ""}`}
-                            onClick={() => setKnowledgeTab("chat")}
-                          >
-                            <MessageSquareText aria-hidden="true" />
-                            对话调度
-                          </button>
-                          <button
-                            type="button"
-                            role="tab"
-                            aria-selected={knowledgeTab === "mcp"}
-                            className={`${styles.ragPanelTab} ${knowledgeTab === "mcp" ? styles.ragPanelTabActive : ""}`}
-                            onClick={() => setKnowledgeTab("mcp")}
-                          >
-                            <Cable aria-hidden="true" />
-                            MCP 注册
-                          </button>
-                          <button
-                            type="button"
-                            role="tab"
-                            aria-selected={knowledgeTab === "skill"}
-                            className={`${styles.ragPanelTab} ${knowledgeTab === "skill" ? styles.ragPanelTabActive : ""}`}
-                            onClick={() => setKnowledgeTab("skill")}
-                          >
-                            <PackageCheck aria-hidden="true" />
-                            Skill 注册
-                          </button>
-                        </div>
-
-                        <div className={styles.ragPanelBody}>
-                          {knowledgeTab === "chat" ? (
-                            <>
-                              <div className={styles.controlPanelHeader}>
-                                <MessageSquareText aria-hidden="true" />
-                                <div>
-                                  <strong>{selectedAgent.name} 对话调度</strong>
-                                  <span>POST /api/claude-code/chat</span>
-                                </div>
-                              </div>
-                              <textarea
-                                className={styles.controlTextarea}
-                                value={chatMessage}
-                                onChange={(event) => setChatMessage(event.target.value)}
-                                rows={4}
-                              />
-                              <button
-                                className={styles.actionButton}
-                                type="button"
-                                onClick={submitClaudeChat}
-                              >
-                                <Send aria-hidden="true" />
-                                提交业务请求
-                              </button>
-                            </>
-                          ) : knowledgeTab === "mcp" ? (
-                            <>
-                              <div className={styles.controlPanelHeader}>
-                                <Cable aria-hidden="true" />
-                                <div>
-                                  <strong>MCP Server 注册</strong>
-                                  <span>POST /api/mcp/invoke</span>
-                                </div>
-                              </div>
-                              <textarea
-                                className={styles.controlTextarea}
-                                value={mcpConfig}
-                                onChange={(event) => setMcpConfig(event.target.value)}
-                                rows={7}
-                              />
-                              <div className={styles.controlActions}>
-                                <label className={styles.fileButton}>
-                                  <UploadCloud aria-hidden="true" />
-                                  上传 JSON
-                                  <input
-                                    type="file"
-                                    accept=".json,.mcp,.txt"
-                                    onChange={(event) => readTextFile(event, setMcpConfig)}
-                                  />
-                                </label>
-                                <button
-                                  className={styles.viewButton}
-                                  type="button"
-                                  onClick={() => void openRegistryDialog("mcp")}
-                                >
-                                  <List aria-hidden="true" />
-                                  查看
-                                </button>
-                                <button className={styles.actionButton} type="button" onClick={registerMcp}>
-                                  登记 MCP
-                                </button>
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <div className={styles.controlPanelHeader}>
-                                <PackageCheck aria-hidden="true" />
-                                <div>
-                                  <strong>Claude Code Skill 注册</strong>
-                                  <span>POST /api/skills/run</span>
-                                </div>
-                              </div>
-                              <textarea
-                                className={styles.controlTextarea}
-                                value={skillContent}
-                                onChange={(event) => setSkillContent(event.target.value)}
-                                rows={7}
-                              />
-                              <div className={styles.controlActions}>
-                                <label className={styles.fileButton}>
-                                  <UploadCloud aria-hidden="true" />
-                                  上传 SKILL.md
-                                  <input
-                                    type="file"
-                                    accept=".md,.txt"
-                                    onChange={(event) => readTextFile(event, setSkillContent)}
-                                  />
-                                </label>
-                                <button
-                                  className={styles.viewButton}
-                                  type="button"
-                                  onClick={() => void openRegistryDialog("skill")}
-                                >
-                                  <List aria-hidden="true" />
-                                  查看
-                                </button>
-                                <button className={styles.actionButton} type="button" onClick={registerSkill}>
-                                  登记 Skill
-                                </button>
-                              </div>
-                            </>
-                          )}
-                        </div>
+                    {knowledge.transfers.filter((transfer) => !getKnowledgeLink(transfer.peer.id)).slice(-2).map((transfer) => (
+                      <div key={transfer.id} className={styles.knowledgeExternalNotice}
+                        data-knowledge-external={transfer.direction} role="status" title={transfer.peer.name}>
+                        <span>{transfer.direction === "request" ? "外部请求" : "返回外部"}</span>
+                        <strong>{transfer.peer.name}</strong>
                       </div>
-                    ) : null}
+                    ))}
                   </div>
                 );
               }
@@ -1123,7 +762,9 @@ export default function CommandCenterPage() {
                 />
                 <div className={styles.unifiedOrchAgentInfo}>
                   <strong>{agent.name}</strong>
-                  <span>{agent.working ? agent.task : agent.connected ? agent.status : "未连接"}</span>
+                  <span>{agent.id === "rag"
+                    ? agent.connected ? `已连接 · ${agent.working ? "检索中" : "空闲"}` : "未连接"
+                    : agent.working ? agent.task : agent.connected ? agent.status : "未连接"}</span>
                 </div>
               </div>
             ))}
@@ -1264,7 +905,9 @@ export default function CommandCenterPage() {
         <footer className={styles.footer}>
           <span>
             <CheckCircle2 aria-hidden="true" />
-            {hasStatusConnection
+            {knowledge.agent.connected
+              ? "知识库已连接"
+              : hasStatusConnection
               ? "Agent_SDR 状态接口运行正常"
               : eventStreamConnected
                 ? "业务事件接收正常，状态接口未连接"
@@ -1279,6 +922,50 @@ export default function CommandCenterPage() {
           </span>
         </footer>
       </main>
+
+      {knowledgePanelOpen ? (
+        <aside
+          id="knowledge-panel"
+          ref={knowledgePanelRef}
+          className={styles.ragPanel}
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="knowledge-panel-title"
+          tabIndex={-1}
+        >
+          <div className={styles.ragPanelHeader}>
+            <button
+              type="button"
+              className={styles.ragPanelDragHandle}
+              aria-label="移动知识面板"
+              title="按住标题栏拖动，也可用方向键移动"
+              {...knowledgePanelDrag}
+            >
+              <span className={styles.ragPanelHeaderIcon}><BrainCircuit aria-hidden="true" /></span>
+              <span id="knowledge-panel-title" className={styles.ragPanelTitle}>知识智能体</span>
+              <GripHorizontal className={styles.ragPanelGrip} aria-hidden="true" />
+            </button>
+            <button
+              className={styles.ragPanelClose}
+              type="button"
+              aria-label="关闭交互面板"
+              onClick={closeKnowledgePanel}
+            >
+              <X aria-hidden="true" />
+            </button>
+          </div>
+          <KnowledgeQueryContent tab={knowledgeTab} onTab={setKnowledgeTab}
+            question={chatMessage} onQuestion={setChatMessage} sender={knowledgeSender} onSender={setKnowledgeSender}
+            modelProfile={knowledgeModelProfile} onModelProfile={setKnowledgeModelProfile}
+            result={knowledgeAnswer.result} busy={knowledgeAnswer.busy} error={knowledgeAnswer.error}
+            onSubmit={submitKnowledgeSearch} />
+          <div className={styles.ragPanelStatus} role="status" aria-live="polite">
+            <span aria-hidden="true" />
+            {controlStatus}
+          </div>
+        </aside>
+      ) : null}
+
     </div>
   );
 }
